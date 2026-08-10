@@ -66,6 +66,7 @@ import {
   type MotokoTranscriptState,
 } from "./cockpit/MotokoPanel";
 import { handleDevOpenPreview } from "./cockpit/DevPanel";
+import { manualProposalInput } from "./cockpit/motoko/motoko.logic";
 import { useGitsCockpitQueries } from "./cockpit/useGitsCockpitQueries";
 import { useDevCommandSessions } from "./cockpit/useDevCommandSessions";
 
@@ -86,6 +87,7 @@ export function GitsCockpit() {
   } | null>(null);
   const [mcpAuthError, setMcpAuthError] = useState<string | null>(null);
   const [motokoChatInput, setMotokoChatInput] = useState("");
+  const [manualProposalPrompt, setManualProposalPrompt] = useState("");
   // One chat per Motoko route: keyed by trimmed project root ("" = root/gits).
   const [motokoTranscripts, setMotokoTranscripts] = useState<MotokoTranscriptState>(() =>
     loadMotokoTranscripts(),
@@ -334,6 +336,23 @@ export function GitsCockpit() {
     mutationFn: async () =>
       readGitsClient().hermes.inspectGits({ projectDir: selectedProjectRoot.trim() }),
     onSuccess: async () => {
+      await Promise.all([
+        hermesProposalsQuery.refetch(),
+        hermesLogQuery.refetch(),
+        hermesQuery.refetch(),
+      ]);
+    },
+  });
+  const hermesGenerateProposalMutation = useMutation({
+    mutationFn: async () => {
+      const input = manualProposalInput(selectedProjectRoot, manualProposalPrompt);
+      if (input === null) {
+        throw new Error("Select a workspace and enter a proposal idea.");
+      }
+      return readGitsClient().hermes.inspectGits(input);
+    },
+    onSuccess: async () => {
+      setManualProposalPrompt("");
       await Promise.all([
         hermesProposalsQuery.refetch(),
         hermesLogQuery.refetch(),
@@ -641,6 +660,7 @@ export function GitsCockpit() {
     hermesAcpMutation.error ??
     hermesContextMutation.error ??
     hermesInspectMutation.error ??
+    hermesGenerateProposalMutation.error ??
     hermesChatMutation.error ??
     hermesDecisionMutation.error ??
     hermesDraftMutation.error ??
@@ -651,6 +671,7 @@ export function GitsCockpit() {
     hermesAcpMutation.isPending ||
     hermesContextMutation.isPending ||
     hermesInspectMutation.isPending ||
+    hermesGenerateProposalMutation.isPending ||
     hermesChatMutation.isPending ||
     hermesDecisionMutation.isPending ||
     hermesDraftMutation.isPending ||
@@ -887,6 +908,7 @@ export function GitsCockpit() {
                   transcript={motokoTranscript}
                   selectedProjectRoot={selectedProjectRoot}
                   chatInput={motokoChatInput}
+                  manualProposalPrompt={manualProposalPrompt}
                   interactionMode={motokoInteractionMode}
                   scheduleKind={motokoScheduleKind}
                   actionPending={hermesActionPending}
@@ -904,11 +926,13 @@ export function GitsCockpit() {
                   }
                   onProjectRootChange={setSelectedProjectRoot}
                   onChatInputChange={setMotokoChatInput}
+                  onManualProposalPromptChange={setManualProposalPrompt}
                   onScheduleKindChange={setMotokoScheduleKind}
                   onCheck={() => void hermesCheckMutation.mutate()}
                   onSetupCodexOAuth={() => void hermesSetupMutation.mutate()}
                   onStartAcp={() => void hermesAcpMutation.mutate()}
                   onInspectGits={() => void hermesInspectMutation.mutate()}
+                  onGenerateProposal={() => void hermesGenerateProposalMutation.mutate()}
                   onChatSubmit={() => {
                     const message = motokoChatInput.trim();
                     if (message.length === 0) {

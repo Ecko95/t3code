@@ -3,6 +3,18 @@
 
 export const MOTOKO_TRANSCRIPT_RENDER_LIMIT = 80;
 
+export function manualProposalInput(projectDir: string, prompt: string) {
+  const trimmedProjectDir = projectDir.trim();
+  const trimmedPrompt = prompt.trim();
+  return trimmedProjectDir.length === 0 || trimmedPrompt.length === 0
+    ? null
+    : {
+        projectDir: trimmedProjectDir,
+        prompt: trimmedPrompt,
+        actionKind: "worktree-spawn" as const,
+      };
+}
+
 /** True when the scrollable region is within `thresholdPx` of its bottom edge. */
 export function isNearBottom(
   metrics: {

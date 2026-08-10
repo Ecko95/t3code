@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { computeRestorableAfterSend, isNearBottom, visibleTranscriptWindow } from "./motoko.logic";
+import {
+  computeRestorableAfterSend,
+  isNearBottom,
+  manualProposalInput,
+  visibleTranscriptWindow,
+} from "./motoko.logic";
 
 describe("isNearBottom", () => {
   it("is true when scrolled to the very bottom", () => {
@@ -96,5 +101,20 @@ describe("computeRestorableAfterSend", () => {
         inFlightMessage: "please deploy",
       }),
     ).toEqual({ entryId: "motoko-err-1", message: "please deploy" });
+  });
+});
+
+describe("manualProposalInput", () => {
+  it("builds a worktree proposal request from a selected workspace and trimmed idea", () => {
+    expect(manualProposalInput(" /repo ", "  Fix failing login tests  ")).toEqual({
+      projectDir: "/repo",
+      prompt: "Fix failing login tests",
+      actionKind: "worktree-spawn",
+    });
+  });
+
+  it("rejects a root route or blank idea", () => {
+    expect(manualProposalInput("", "idea")).toBeNull();
+    expect(manualProposalInput("/repo", "   ")).toBeNull();
   });
 });

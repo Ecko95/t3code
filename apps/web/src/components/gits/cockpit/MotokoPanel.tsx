@@ -786,6 +786,7 @@ export function MotokoPanel({
   transcript,
   selectedProjectRoot,
   chatInput,
+  manualProposalPrompt,
   interactionMode,
   scheduleKind,
   actionPending,
@@ -793,11 +794,13 @@ export function MotokoPanel({
   onToggleInteractionMode,
   onProjectRootChange,
   onChatInputChange,
+  onManualProposalPromptChange,
   onScheduleKindChange,
   onCheck,
   onSetupCodexOAuth,
   onStartAcp,
   onInspectGits,
+  onGenerateProposal,
   onChatSubmit,
   onClearChat,
   onNewChat,
@@ -822,6 +825,7 @@ export function MotokoPanel({
   transcript: ReadonlyArray<MotokoTranscriptEntry>;
   selectedProjectRoot: string;
   chatInput: string;
+  manualProposalPrompt: string;
   interactionMode: MotokoInteractionMode;
   scheduleKind: HermesScheduleKind;
   actionPending: boolean;
@@ -829,11 +833,13 @@ export function MotokoPanel({
   onToggleInteractionMode: () => void;
   onProjectRootChange: (value: string) => void;
   onChatInputChange: (value: string) => void;
+  onManualProposalPromptChange: (value: string) => void;
   onScheduleKindChange: (value: HermesScheduleKind) => void;
   onCheck: () => void;
   onSetupCodexOAuth: () => void;
   onStartAcp: () => void;
   onInspectGits: () => void;
+  onGenerateProposal: () => void;
   onChatSubmit: () => void;
   onClearChat: () => void;
   onNewChat: () => void;
@@ -1265,6 +1271,31 @@ export function MotokoPanel({
                 ) : null}
               </div>
             ) : null}
+
+            <div className="grid gap-2 rounded-md border border-border/70 bg-muted/20 px-3 py-3">
+              <label className="font-medium text-muted-foreground" htmlFor="motoko-proposal-idea">
+                Proposal idea
+              </label>
+              <textarea
+                id="motoko-proposal-idea"
+                value={manualProposalPrompt}
+                className="min-h-20 w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-xs leading-relaxed outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/24"
+                placeholder="Describe the change you want Hermes to plan"
+                onChange={(event) => onManualProposalPromptChange(event.currentTarget.value)}
+              />
+              <Button
+                size="sm"
+                onClick={onGenerateProposal}
+                disabled={
+                  actionPending ||
+                  selectedProjectRoot.trim().length === 0 ||
+                  manualProposalPrompt.trim().length === 0
+                }
+              >
+                <MessageSquarePlusIcon className="size-3.5" />
+                Generate proposal
+              </Button>
+            </div>
 
             <div className="grid gap-2 rounded-md border border-border/70 bg-muted/20 px-3 py-3">
               <div className="flex items-center justify-between gap-2">
