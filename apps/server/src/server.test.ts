@@ -21,7 +21,7 @@ import {
   type HermesExecutionDraft,
   type HermesLogTailResult,
   type HermesProjectContextResult,
-  type HermesProposalCard,
+  HermesProposalCard,
   type HermesProposalListResult,
   type HermesSafeConfig,
   type HermesScheduleRunResult,
@@ -62,6 +62,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -124,6 +125,27 @@ import { GitsDevCommands, type GitsDevCommandsShape } from "./gits/Services/Gits
 import { GitsPorts, type GitsPortsShape } from "./gits/Services/GitsPorts.ts";
 import { GitsNotes, type GitsNotesShape } from "./gits/Services/GitsNotes.ts";
 import { DelamainAdapter, type DelamainAdapterShape } from "./gits/Services/DelamainAdapter.ts";
+import { AutomodeLanding } from "./gits/Services/AutomodeLanding.ts";
+import { AutomodeUsageMeter } from "./gits/Services/AutomodeUsageMeter.ts";
+import { AutomodeNotificationDispatcher } from "./gits/Services/AutomodeNotificationDispatcher.ts";
+import { HermesTelegramNotifier } from "./gits/Services/HermesTelegramNotifier.ts";
+import {
+  PushNotificationService,
+  type PushNotificationPayload,
+} from "./push/Services/PushNotificationService.ts";
+import {
+  AutomodeNotificationDispatcherLive,
+  proposalNotificationUrl,
+} from "./gits/Layers/AutomodeNotificationDispatcher.ts";
+import { AutomodeSupervisorLive } from "./gits/Layers/AutomodeSupervisor.ts";
+import { AutomodeSupervisorTestRoutingLayer } from "./gits/Layers/AutomodeSupervisor.testHelpers.ts";
+import { reviewProposalWithAutomodeBridge } from "./gits/Layers/HermesAutomodeBridge.ts";
+import {
+  draftFromProposal,
+  listProposals,
+  makeProposal,
+  reviewProposal,
+} from "./gits/Layers/HermesCliAdapter.ts";
 import { OpenGsdAdapter, type OpenGsdAdapterShape } from "./gits/Services/OpenGsdAdapter.ts";
 import {
   AutomodeSupervisor,
@@ -7199,3 +7221,149 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 });
+
+// End-to-end slice for the proposal review flow, over REAL layers (proposal store,
+// notification dispatcher, supervisor, review bridge) rather than the stubs the RPC tests
+// above use: proposal persisted → PWA notification routed → reviewed with edits → approved
+// → exactly one queued goal carrying the not-before time and the edited execution settings.
+it.effect("routes a persisted proposal through notification, edited approval, and the queue", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const hermesHome = yield* fs.makeTempDirectoryScoped({ prefix: "gits-review-flow-" });
+    vi.stubEnv("GITS_HERMES_HOME", hermesHome);
+    yield* Effect.addFinalizer(() => Effect.sync(() => vi.unstubAllEnvs()));
+
+    const repo = yield* fs.makeTempDirectoryScoped({ prefix: "gits-review-flow-repo-" });
+    const card = makeProposal({
+      title: "Finish the retry migration",
+      summary: "The retry path is half migrated.",
+      detail: "Detail.",
+      actionKind: "worktree-spawn",
+      status: "proposed",
+      blockedReason: null,
+      source: "hermes chat -q",
+      projectDir: repo,
+      now: "2026-01-01T00:00:00.000Z",
+    });
+    yield* fs.writeFileString(
+      `${hermesHome}/gits-proposals.json`,
+      yield* Schema.encodeEffect(Schema.fromJsonString(Schema.Array(HermesProposalCard)))([card]),
+    );
+
+    const pushed: PushNotificationPayload[] = [];
+    const notificationLayer = AutomodeNotificationDispatcherLive.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.succeed(PushNotificationService, {
+            getPublicConfig: () => ({ enabled: true, publicKey: "test-key" }),
+            sendToAll: (payload) =>
+              Effect.sync(() => {
+                pushed.push(payload);
+              }),
+            sendForOrchestrationEvent: () => Effect.void,
+          }),
+          Layer.succeed(HermesTelegramNotifier, { notify: () => Effect.void }),
+        ),
+      ),
+    );
+    const supervisorLayer = AutomodeSupervisorLive.pipe(
+      Layer.provide(AutomodeSupervisorTestRoutingLayer),
+      Layer.provide(
+        Layer.mock(DelamainAdapter)({
+          listPeers: () =>
+            Effect.succeed({
+              capabilities: {
+                available: true,
+                binaryPath: "delamain",
+                supported: ["list", "spawn"],
+                unsupported: ["status", "log", "kill", "reply", "wait", "integrate"],
+                checkedAt: "2026-01-01T00:00:00.000Z",
+              },
+              peers: [],
+            }),
+          spawnPeer: () => Effect.succeed(defaultDelamainPeer),
+          killPeer: () => Effect.succeed(defaultDelamainPeer),
+        }),
+      ),
+      Layer.provide(Layer.mock(AutomodeLanding)({ ensure_integration_branch: () => Effect.void })),
+      Layer.provide(
+        Layer.mock(AutomodeUsageMeter)({
+          readBudgetUsage: () =>
+            Effect.succeed({
+              source: "provider-runtime" as const,
+              totalCostUsd: 0,
+              totalProcessedTokens: 0,
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              note: null,
+            }),
+        }),
+      ),
+    );
+
+    yield* Effect.gen(function* () {
+      const supervisor = yield* AutomodeSupervisor;
+      const dispatcher = yield* AutomodeNotificationDispatcher;
+      yield* supervisor.updatePolicy({
+        mode: "autonomous",
+        killSwitchEnabled: false,
+        requireApprovalForPeerSpawn: false,
+        allowedRepos: [repo],
+        maxBudgetUsd: 25,
+      });
+      const policy = yield* supervisor.getPolicy();
+      // PWA on, Telegram off is the shipped default — the proposal notification must route.
+      assert.equal(policy.gitsNotificationsEnabled, true);
+      assert.equal(policy.telegramNotificationsEnabled, false);
+
+      yield* dispatcher.notify({
+        key: `proposal-created:${card.id}`,
+        subject: "GITS proposal ready for review",
+        text: card.title,
+        url: proposalNotificationUrl(card.id),
+        policy,
+      });
+      assert.equal(pushed.length, 1);
+      assert.equal(pushed[0]?.url, `/gits?panel=autopilot&proposal=${card.id}`);
+      // The notification body must not carry the execution prompt.
+      assert.notInclude(pushed[0]?.body ?? "", card.nextCommandOrPrompt ?? "PROMPT");
+
+      const hermes = { listProposals, reviewProposal, draftFromProposal };
+      const reviewed = yield* reviewProposalWithAutomodeBridge(hermes, supervisor, {
+        proposalId: card.id,
+        decision: "approve",
+        edits: {
+          title: "Finish the retry migration (edited)",
+          prompt: "Continue the retry migration in an isolated worktree.",
+          projectDir: repo,
+          notBefore: "2026-01-08T22:00:00.000Z",
+          maxRuntimeMinutes: 45,
+        },
+      });
+      assert.equal(reviewed.status, "approved");
+
+      const snapshot = yield* supervisor.getSnapshot();
+      assert.equal(snapshot.goals.length, 1);
+      const goal = snapshot.goals[0]!;
+      assert.equal(goal.title, "Finish the retry migration (edited)");
+      assert.equal(goal.prompt, "Continue the retry migration in an isolated worktree.");
+      assert.equal(goal.repo, repo);
+      assert.equal(goal.notBefore, "2026-01-08T22:00:00.000Z");
+      assert.equal(goal.maxRuntimeMinutes, 45);
+      // Queued, not running: approval never bypasses the scheduler or the policy gates.
+      assert.equal(goal.status, "queued");
+      assert.equal(goal.origin, "proposal");
+      assert.equal(goal.episodeId, card.episodeId);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(supervisorLayer, notificationLayer).pipe(
+          Layer.provideMerge(
+            ServerConfig.layerTest(process.cwd(), { prefix: "gits-review-flow-state-" }).pipe(
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
