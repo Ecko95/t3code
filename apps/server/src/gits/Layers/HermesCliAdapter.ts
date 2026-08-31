@@ -1972,6 +1972,11 @@ const makeInspectGitsAndPropose =
       const detail =
         nonEmpty(exec.stdout) ?? nonEmpty(exec.stderr) ?? "Hermes returned no proposal.";
       const summary = summarizeProposal(detail);
+      // Continuation attribution: the card is a thread continuation only if Hermes cited
+      // one of the offered thread ids in its output. First citation wins — a card carries
+      // one source thread.
+      const citedThreadId =
+        input.candidateThreadIds?.find((threadId) => detail.includes(threadId)) ?? null;
       const proposal = makeProposal({
         title: summary.title,
         summary: summary.summary,
@@ -1988,7 +1993,9 @@ const makeInspectGitsAndPropose =
         evidence: [
           "Hermes was invoked in read-only inspection mode.",
           `Hermes exit code: ${exec.exitCode === null ? "unknown" : String(exec.exitCode)}`,
+          ...(citedThreadId === null ? [] : [`Continues unfinished GITS thread ${citedThreadId}.`]),
         ],
+        sourceThreadId: citedThreadId,
       });
       const proposals = yield* Effect.tryPromise({
         try: () => readProposals(config),

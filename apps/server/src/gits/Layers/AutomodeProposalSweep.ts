@@ -10,6 +10,8 @@ import * as Semaphore from "effect/Semaphore";
 
 import type { AutomodeGoal } from "@t3tools/contracts";
 
+import type { MotokoContinuationCandidate } from "../Services/MotokoContinuationSource.ts";
+
 import { writeFileStringAtomically } from "../../atomicWrite.ts";
 import { shortGoalCode } from "../HermesTelegramCommand.ts";
 import { ServerConfig } from "../../config.ts";
@@ -17,6 +19,7 @@ import { AutomodeEpisodeLedger } from "../../persistence/Services/AutomodeEpisod
 import { HermesAdapter } from "../Services/HermesAdapter.ts";
 import { AutomodeProposalSweep } from "../Services/AutomodeProposalSweep.ts";
 import { AutomodeNotificationDispatcher } from "../Services/AutomodeNotificationDispatcher.ts";
+import { MotokoContinuationSource } from "../Services/MotokoContinuationSource.ts";
 import { AutomodeSupervisor } from "../Services/AutomodeSupervisor.ts";
 import { proposalNotificationUrl, automodeSectionUrl } from "./AutomodeNotificationDispatcher.ts";
 import { hasLiveGoalForRepo } from "./HermesAutomodeBridge.ts";
@@ -105,6 +108,7 @@ export const AutomodeProposalSweepLive = Layer.effect(
     const hermes = yield* HermesAdapter;
     const ledger = yield* AutomodeEpisodeLedger;
     const dispatcher = yield* AutomodeNotificationDispatcher;
+    const continuationSource = yield* MotokoContinuationSource;
     const parsedStart = parseStartMinutes(process.env.GITS_PROPOSAL_SWEEP_START_HHMM);
     if (parsedStart.error !== null) {
       yield* Effect.logWarning("gits.sweep.start-invalid", { detail: parsedStart.error });
@@ -119,7 +123,10 @@ export const AutomodeProposalSweepLive = Layer.effect(
     // delamain-peer as a queued goal carrying the card's episodeId. A failure here is
     // logged and swallowed so the sweep continues to the next repo. Returns the enqueued
     // goal (null on any skip/failure) so the caller can gate approval and notify.
-    const sweepRepo = (repo: string): Effect.Effect<AutomodeGoal | null> =>
+    const sweepRepo = (
+      repo: string,
+      candidates: ReadonlyArray<MotokoContinuationCandidate>,
+    ): Effect.Effect<AutomodeGoal | null> =>
       Effect.gen(function* () {
         // Dedup by repo, ahead of hermes: a fresh inspect always mints a new episodeId, so
         // episode dedup could never fire here. A repo whose prior-night sweep or cockpit
@@ -142,12 +149,33 @@ export const AutomodeProposalSweepLive = Layer.effect(
                     `- ${episode.goalTitle}: ${episode.verdict}${episode.flagged ? " (flagged)" : ""}`,
                 ),
               ].join("\n");
+        // Second proposal source: unfinished work from this repo's past threads. Only the
+        // thread's own persisted summary is folded in — never a raw transcript — and it is
+        // offered as candidate context, not an instruction, so the repository-pattern
+        // proposal remains available when nothing unfinished stands out.
+        const repoCandidates = candidates.filter((candidate) => candidate.projectPath === repo);
+        const continuationSection =
+          repoCandidates.length === 0
+            ? undefined
+            : [
+                "Unfinished GITS threads for this repo (cite the thread id if you continue one):",
+                ...repoCandidates.map(
+                  (candidate) =>
+                    `- [${candidate.threadId}] ${candidate.title}: ${candidate.summary}`,
+                ),
+              ].join("\n");
+        const promptSections = [outcomesSection, continuationSection].filter(
+          (section): section is string => section !== undefined,
+        );
         // "worktree-spawn" makes the card actionable: a read-only inspect card can only ever
         // draft as "verification", never "delamain-peer" (draftKindFor keys on actionKind).
         const card = yield* hermes.inspectGitsAndPropose({
           projectDir: repo,
           actionKind: "worktree-spawn",
-          ...(outcomesSection === undefined ? {} : { prompt: outcomesSection }),
+          ...(promptSections.length === 0 ? {} : { prompt: promptSections.join("\n\n") }),
+          ...(repoCandidates.length === 0
+            ? {}
+            : { candidateThreadIds: repoCandidates.map((candidate) => candidate.threadId) }),
         });
         if (card.status === "blocked" || card.projectDir === null) {
           yield* Effect.logInfo("gits.sweep.card-skipped", {
@@ -222,6 +250,8 @@ export const AutomodeProposalSweepLive = Layer.effect(
           );
           yield* Ref.set(stateRef, next);
           // Sequential: hermes invocations share codex capacity — never parallelise.
+          // One projection read for the whole sweep; sweepRepo filters to its own repo.
+          const candidates = yield* continuationSource.listCandidates();
           const newGoals: AutomodeGoal[] = [];
           let attemptedRepos = 0;
           for (const repo of policy.proposalRepos) {
@@ -230,7 +260,7 @@ export const AutomodeProposalSweepLive = Layer.effect(
               continue;
             }
             attemptedRepos += 1;
-            const goal = yield* sweepRepo(repo);
+            const goal = yield* sweepRepo(repo, candidates);
             if (goal === null) continue;
             newGoals.push(goal);
             if (policy.sweepRequiresConfirmation) {

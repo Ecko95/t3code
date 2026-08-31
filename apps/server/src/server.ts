@@ -81,6 +81,7 @@ import { AutomodeSupervisorLive } from "./gits/Layers/AutomodeSupervisor.ts";
 import { AutomodeUsageMeterLive } from "./gits/Layers/AutomodeUsageMeter.ts";
 import { AutomodeDriverLive } from "./gits/Layers/AutomodeDriver.ts";
 import { AutomodeNotificationDispatcherLive } from "./gits/Layers/AutomodeNotificationDispatcher.ts";
+import { MotokoContinuationSourceLive } from "./gits/Layers/MotokoContinuationSource.ts";
 import { AutomodeProposalSweepLive } from "./gits/Layers/AutomodeProposalSweep.ts";
 import { AutomodeTelegramDigestLive } from "./gits/Layers/AutomodeTelegramDigest.ts";
 import { GitsSlotSchedulerLive } from "./gits/Layers/GitsSlotScheduler.ts";
@@ -371,10 +372,16 @@ const AutomodeNotificationDispatcherLayerLive = AutomodeNotificationDispatcherLi
   Layer.provide(HermesTelegramNotifierLive),
 );
 
+// Continuation candidates come from the same orchestration projection the supervisor reads.
+const MotokoContinuationSourceLayerLive = MotokoContinuationSourceLive.pipe(
+  Layer.provide(OrchestrationLayerLive),
+);
+
 const AutomodeProposalSweepLayerLive = AutomodeProposalSweepLive.pipe(
   Layer.provide(AutomodeSupervisorLayerLive),
   Layer.provide(HermesAdapterLayerLive),
   Layer.provide(AutomodeNotificationDispatcherLayerLive),
+  Layer.provide(MotokoContinuationSourceLayerLive),
 );
 
 const AutomodeDriverLayerLive = AutomodeDriverLive.pipe(

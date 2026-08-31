@@ -22,6 +22,10 @@ import { AutomodeUsageMeter } from "../Services/AutomodeUsageMeter.ts";
 import { DelamainAdapter } from "../Services/DelamainAdapter.ts";
 import { HermesAdapter } from "../Services/HermesAdapter.ts";
 import { AutomodeNotificationDispatcher } from "../Services/AutomodeNotificationDispatcher.ts";
+import {
+  MotokoContinuationSource,
+  type MotokoContinuationCandidate,
+} from "../Services/MotokoContinuationSource.ts";
 import { AutomodeProposalSweepLive } from "./AutomodeProposalSweep.ts";
 import { AutomodeSupervisorLive } from "./AutomodeSupervisor.ts";
 import { AutomodeSupervisorTestRoutingLayer } from "./AutomodeSupervisor.testHelpers.ts";
@@ -110,6 +114,7 @@ interface HermesOptions {
   readonly onInspect?: (input: { readonly projectDir: string; readonly prompt?: string }) => void;
   readonly episodes?: ReadonlyArray<AutomodeEpisode>;
   readonly telegramSent?: string[];
+  readonly candidates?: ReadonlyArray<MotokoContinuationCandidate>;
 }
 
 function makeLayer(hermesOptions: HermesOptions = {}) {
@@ -138,7 +143,7 @@ function makeLayer(hermesOptions: HermesOptions = {}) {
   // cross-night dedup guard sees distinct episodes.
   let proposalSeq = 0;
   const hermes = Layer.mock(HermesAdapter)({
-    inspectGitsAndPropose: ({ projectDir, prompt }) => {
+    inspectGitsAndPropose: ({ projectDir, prompt, candidateThreadIds }) => {
       hermesOptions.onInspect?.(prompt === undefined ? { projectDir } : { projectDir, prompt });
       proposalSeq += 1;
       return hermesOptions.inspect === undefined
@@ -147,12 +152,18 @@ function makeLayer(hermesOptions: HermesOptions = {}) {
               projectDir,
               id: `proposal-${proposalSeq}`,
               episodeId: `epi-${proposalSeq}`,
+              // Mirrors the real adapter: the card carries a source thread only when the
+              // proposal actually cites one of the offered candidates.
+              sourceThreadId: candidateThreadIds?.[0] ?? null,
             }),
           )
         : hermesOptions.inspect(projectDir);
     },
     decideProposal: () => Effect.succeed(makeCard({ status: "approved" })),
     draftFromProposal: () => Effect.succeed(hermesOptions.draft ?? makeDraft({})),
+  });
+  const continuation = Layer.mock(MotokoContinuationSource)({
+    listCandidates: () => Effect.succeed(hermesOptions.candidates ?? []),
   });
   const ledger = Layer.mock(AutomodeEpisodeLedger)({
     list_episodes: () => Effect.succeed(hermesOptions.episodes ?? []),
@@ -169,6 +180,7 @@ function makeLayer(hermesOptions: HermesOptions = {}) {
     Layer.provideMerge(supervisor),
     Layer.provide(hermes),
     Layer.provide(ledger),
+    Layer.provide(continuation),
     Layer.provide(notifier),
     Layer.provideMerge(TestClock.layer()),
   );
@@ -457,6 +469,80 @@ describe("AutomodeProposalSweep", () => {
       assert.isUndefined(capturedPrompts[0]);
     }).pipe(
       Effect.provide(makeLayer({ onInspect: (input) => capturedPrompts.push(input.prompt) })),
+    );
+  });
+
+  // A continuation candidate must produce the SAME actionable card/goal/notification shape
+  // as a repository-pattern proposal — it is a second source, not a second pipeline.
+  it.effect("turns an unfinished-thread candidate into the same actionable goal", () => {
+    const prompts: string[] = [];
+    const telegramSent: string[] = [];
+    return Effect.gen(function* () {
+      const supervisor = yield* arm({ sweepRequiresConfirmation: false });
+      const sweep = yield* AutomodeProposalSweep;
+      yield* TestClock.setTime(EVENING);
+      yield* sweep.tick();
+
+      // The thread's persisted summary reaches the proposal prompt; no raw transcript does.
+      assert.equal(prompts.length, 1);
+      assert.include(prompts[0] ?? "", "thread-9");
+      assert.include(prompts[0] ?? "", "Left the retry path half-migrated.");
+
+      const snapshot = yield* supervisor.getSnapshot();
+      assert.equal(snapshot.goals.length, 1);
+      assert.equal(snapshot.goals[0]!.status, "queued");
+      assert.equal(snapshot.goals[0]!.repo, REPO);
+
+      // Same notification shape: a proposal deep link, then the sweep summary.
+      assert.equal(telegramSent.length, 2);
+      assert.include(telegramSent[0] ?? "", "GITS proposal ready for review");
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          telegramSent,
+          onInspect: ({ prompt }) => {
+            if (prompt !== undefined) prompts.push(prompt);
+          },
+          candidates: [
+            {
+              threadId: "thread-9",
+              projectPath: REPO,
+              title: "Migrate the retry path",
+              summary: "Left the retry path half-migrated.",
+              updatedAt: "2026-01-06T00:00:00.000Z",
+            },
+          ],
+        }),
+      ),
+    );
+  });
+
+  it.effect("offers candidates only to their own repository", () => {
+    const prompts: string[] = [];
+    return Effect.gen(function* () {
+      const sweep = yield* AutomodeProposalSweep;
+      yield* arm({ sweepRequiresConfirmation: false, proposalRepos: [REPO, OTHER_REPO] });
+      yield* TestClock.setTime(EVENING);
+      yield* sweep.tick();
+
+      assert.equal(prompts.filter((prompt) => prompt.includes("thread-9")).length, 1);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          onInspect: ({ prompt }) => {
+            if (prompt !== undefined) prompts.push(prompt);
+          },
+          candidates: [
+            {
+              threadId: "thread-9",
+              projectPath: OTHER_REPO,
+              title: "Migrate the retry path",
+              summary: "Left the retry path half-migrated.",
+              updatedAt: "2026-01-06T00:00:00.000Z",
+            },
+          ],
+        }),
+      ),
     );
   });
 });

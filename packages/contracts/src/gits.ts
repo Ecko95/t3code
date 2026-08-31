@@ -1449,6 +1449,10 @@ export const HermesInspectGitsProposalInput = Schema.Struct({
   // still required downstream) — a read-only card can only ever become a verification
   // draft (draftKindFor). Pass "read-only" explicitly for inert informational cards.
   actionKind: Schema.optional(HermesProposalActionKind),
+  // Thread ids offered to Hermes as continuation candidates. The adapter stamps
+  // `sourceThreadId` on the created card only when the card actually cites one of them,
+  // so a continuation proposal is self-evidencing rather than assumed.
+  candidateThreadIds: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
 });
 export type HermesInspectGitsProposalInput = typeof HermesInspectGitsProposalInput.Type;
 
