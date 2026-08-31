@@ -3,6 +3,7 @@ import type {
   GitsCodexMcpAuthStartResult,
   GitsMcpServerItem,
   HermesCommandResult,
+  HermesProposalReviewInput,
   HermesScheduleKind,
   OpenGsdCommandResult,
   ProviderInstanceId,
@@ -67,6 +68,11 @@ import {
 } from "./cockpit/MotokoPanel";
 import { handleDevOpenPreview } from "./cockpit/DevPanel";
 import { manualProposalInput } from "./cockpit/motoko/motoko.logic";
+import {
+  parseProposalReviewTarget,
+  stripConsumedReviewParams,
+  type ProposalReviewSection,
+} from "./cockpit/proposalReview.logic";
 import { useGitsCockpitQueries } from "./cockpit/useGitsCockpitQueries";
 import { useDevCommandSessions } from "./cockpit/useDevCommandSessions";
 
@@ -95,6 +101,14 @@ export function GitsCockpit() {
   useEffect(() => {
     saveMotokoTranscripts(motokoTranscripts);
   }, [motokoTranscripts]);
+  useEffect(() => {
+    const parsed = parseProposalReviewTarget(
+      typeof window === "undefined" ? "" : window.location.search,
+    );
+    if (parsed.panel !== null) {
+      setActiveTab(parsed.panel);
+    }
+  }, []);
   const motokoRoute = selectedProjectRoot.trim();
   const motokoTranscript = motokoTranscripts[motokoRoute] ?? EMPTY_MOTOKO_TRANSCRIPT;
   const appendMotokoTranscript = (routeKey: string, entry: MotokoTranscriptEntry) => {
@@ -123,6 +137,25 @@ export function GitsCockpit() {
   const [hermesCommandResult, setHermesCommandResult] = useState<HermesCommandResult | undefined>(
     undefined,
   );
+  // Notification deep link (/gits?panel=autopilot&proposal=<id>), read once on mount: the
+  // query is a one-shot instruction, not state, so it is consumed into component state and
+  // only stripped from the URL when the operator closes the review sheet.
+  const [reviewTarget, setReviewTarget] = useState<{
+    readonly proposalId: string | null;
+    readonly section: ProposalReviewSection | null;
+  }>(() => {
+    const parsed = parseProposalReviewTarget(
+      typeof window === "undefined" ? "" : window.location.search,
+    );
+    return { proposalId: parsed.proposalId, section: parsed.section };
+  });
+  const closeProposalReview = () => {
+    setReviewTarget({ proposalId: null, section: null });
+    if (typeof window === "undefined") return;
+    // Only the parameters the review flow consumed are dropped; anything else survives.
+    const next = stripConsumedReviewParams(window.location.search);
+    window.history.replaceState(null, "", `${window.location.pathname}${next}`);
+  };
 
   const {
     targetEnvironmentId,
@@ -453,6 +486,22 @@ export function GitsCockpit() {
         }`,
         createdAt: new Date().toISOString(),
       });
+    },
+  });
+  // Atomic edit-then-decide from the Autopilot review sheet. Distinct from
+  // hermesDecisionMutation (the Motoko card path): this one saves the operator's edits with
+  // the decision, and approval queues the goal through the server-side review bridge — the
+  // client never enqueues anything itself.
+  const hermesReviewMutation = useMutation({
+    mutationFn: async (input: HermesProposalReviewInput) =>
+      readGitsClient().hermes.reviewProposal(input),
+    onSuccess: async () => {
+      closeProposalReview();
+      await Promise.all([
+        hermesProposalsQuery.refetch(),
+        automodeQuery.refetch(),
+        schedulerQuery.refetch(),
+      ]);
     },
   });
   const hermesDraftMutation = useMutation({
@@ -995,6 +1044,12 @@ export function GitsCockpit() {
                   onSchedulerArm={() => void schedulerArmMutation.mutate()}
                   onSchedulerDisarm={() => void schedulerDisarmMutation.mutate()}
                   onResumeDriver={() => void driverResumeMutation.mutate()}
+                  proposals={hermesProposalsQuery.data?.proposals}
+                  focusedProposalId={reviewTarget.proposalId}
+                  focusedSection={reviewTarget.section}
+                  reviewPending={hermesReviewMutation.isPending}
+                  onReviewProposal={(input) => void hermesReviewMutation.mutate(input)}
+                  onCloseProposalReview={closeProposalReview}
                 />
               ) : null}
               {activeTab === "fleet" ? (

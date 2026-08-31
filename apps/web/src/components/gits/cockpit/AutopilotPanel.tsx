@@ -8,6 +8,9 @@ import type {
   CodexModelTier,
   GitsCockpitProject,
   GitsSchedulerSnapshot,
+  HermesProposalCard,
+  HermesProposalDecision,
+  HermesProposalReviewInput,
   MotokoAuthority,
 } from "@t3tools/contracts";
 import { CODEX_MODEL_TIER_LABELS, CODEX_MODEL_TIERS } from "@t3tools/contracts";
@@ -59,6 +62,13 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { Switch } from "~/components/ui/switch";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "~/components/ui/sheet";
 import { Textarea } from "~/components/ui/textarea";
 import { toastManager } from "~/components/ui/toast";
 
@@ -72,6 +82,12 @@ import {
   reposNotAllowed,
   verdictTone,
 } from "./autopilot/autopilot.logic";
+import {
+  proposalToReviewForm,
+  reviewFormToEdits,
+  type ProposalReviewForm,
+  type ProposalReviewSection,
+} from "./proposalReview.logic";
 import {
   EmptyState,
   SectionHeader,
@@ -125,6 +141,8 @@ const SWITCHBOARD_FIELDS: ReadonlyArray<{
     | "sweepRequiresConfirmation"
     | "autoEnqueueApprovedProposals"
     | "telegramDigestEnabled"
+    | "gitsNotificationsEnabled"
+    | "telegramNotificationsEnabled"
   >;
   label: string;
   description: string;
@@ -149,6 +167,19 @@ const SWITCHBOARD_FIELDS: ReadonlyArray<{
     field: "telegramDigestEnabled",
     label: "Telegram digest",
     description: "Send the daily Telegram digest/report.",
+  },
+  // Independent delivery channels for proposal/goal attention. The GITS toggle only
+  // controls server-side delivery — the browser still has to grant notification
+  // permission and the server still needs VAPID keys configured.
+  {
+    field: "gitsNotificationsEnabled",
+    label: "GITS notifications",
+    description: "Push proposal and goal alerts to this app (needs browser permission).",
+  },
+  {
+    field: "telegramNotificationsEnabled",
+    label: "Telegram notifications",
+    description: "Send the same proposal and goal alerts to Telegram.",
   },
 ];
 
@@ -263,6 +294,190 @@ function RepoMultiSelect({
   );
 }
 
+/**
+ * The review surface a notification deep-links into. Title and prompt are the primary
+ * fields; everything the run needs beyond that lives under Advanced, because the common
+ * case is "read it, approve it" and only the occasional proposal needs its model, timing,
+ * or verification retuned.
+ *
+ * Approve/Defer/Reject all go through the single atomic review RPC, so edits and the
+ * decision can never land apart. Values are re-validated server-side — this only catches
+ * the obvious mistakes before the round trip.
+ */
+function ProposalReviewSheet({
+  proposal,
+  pending,
+  onClose,
+  onReview,
+}: {
+  proposal: HermesProposalCard | null;
+  pending: boolean;
+  onClose: () => void;
+  onReview: (input: HermesProposalReviewInput) => void;
+}) {
+  const [form, setForm] = useState<ProposalReviewForm | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  // Reseed whenever a different card is focused; edits to the open card are preserved
+  // across background refetches (the poll must not clobber what the operator typed).
+  useEffect(() => {
+    setForm(proposal === null ? null : proposalToReviewForm(proposal));
+    setFormError(null);
+  }, [proposal?.id]);
+
+  const patch = (next: Partial<ProposalReviewForm>) =>
+    setForm((current) => (current === null ? current : { ...current, ...next }));
+
+  const submit = (decision: HermesProposalDecision) => {
+    if (proposal === null || form === null) {
+      return;
+    }
+    const result = reviewFormToEdits(form);
+    if (!result.ok) {
+      setFormError(result.error);
+      return;
+    }
+    setFormError(null);
+    onReview({ proposalId: proposal.id, decision, edits: result.edits });
+  };
+
+  return (
+    <Sheet open={proposal !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
+      <SheetContent side="right" className="sm:max-w-xl">
+        <SheetHeader>
+          <SheetTitle>Review proposal</SheetTitle>
+          <SheetDescription>
+            {proposal === null
+              ? null
+              : `${proposal.status} · risk ${proposal.risk} · ${proposal.actionKind}`}
+          </SheetDescription>
+        </SheetHeader>
+        {proposal === null || form === null ? (
+          <EmptyState label="Proposal not found." />
+        ) : (
+          <div className="grid min-w-0 gap-4 overflow-y-auto px-4 py-4 text-xs">
+            <p className="leading-relaxed text-muted-foreground">{proposal.summary}</p>
+            {proposal.sourceThreadId ? (
+              <p className="text-[11px] text-muted-foreground">
+                Continues thread <span className="font-mono">{proposal.sourceThreadId}</span>
+              </p>
+            ) : null}
+            <label className="grid gap-1.5">
+              <span className="font-medium">Title</span>
+              <Input
+                nativeInput
+                size="sm"
+                value={form.title}
+                onChange={(event) => patch({ title: event.currentTarget.value })}
+              />
+            </label>
+            <label className="grid gap-1.5">
+              <span className="font-medium">Execution prompt</span>
+              <Textarea
+                value={form.prompt}
+                className="min-h-32 text-xs"
+                onChange={(event) => patch({ prompt: event.currentTarget.value })}
+              />
+            </label>
+            <details className="overflow-hidden rounded-md border border-border/60 bg-background/70">
+              <summary className="cursor-pointer select-none px-3 py-2 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground">
+                Advanced
+              </summary>
+              <div className="grid gap-3 border-t border-border/60 px-3 py-3">
+                <label className="grid gap-1.5">
+                  <span className="font-medium">Repository</span>
+                  <Input
+                    nativeInput
+                    size="sm"
+                    value={form.projectDir}
+                    placeholder="/path/to/repo"
+                    onChange={(event) => patch({ projectDir: event.currentTarget.value })}
+                  />
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="font-medium">Model</span>
+                  <Input
+                    nativeInput
+                    size="sm"
+                    value={form.model}
+                    placeholder="policy default"
+                    onChange={(event) => patch({ model: event.currentTarget.value })}
+                  />
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="font-medium">Proposed run time</span>
+                  <Input
+                    nativeInput
+                    size="sm"
+                    type="datetime-local"
+                    value={form.notBefore}
+                    onChange={(event) => patch({ notBefore: event.currentTarget.value })}
+                  />
+                  <span className="text-[11px] text-muted-foreground">
+                    Not-before, not a schedule: the goal still waits for the slot scheduler, arming,
+                    capacity, and the kill switch.
+                  </span>
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="font-medium">Runtime limit (minutes)</span>
+                  <Input
+                    nativeInput
+                    size="sm"
+                    value={form.maxRuntimeMinutes}
+                    placeholder="policy default"
+                    onChange={(event) => patch({ maxRuntimeMinutes: event.currentTarget.value })}
+                  />
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="font-medium">Verification commands (JSON)</span>
+                  <Textarea
+                    value={form.verificationCommandsText}
+                    className="min-h-24 font-mono text-[11px]"
+                    placeholder='[{"label":"test","cmd":["bun","run","test"]}]'
+                    onChange={(event) =>
+                      patch({ verificationCommandsText: event.currentTarget.value })
+                    }
+                  />
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="font-medium">Integration branch</span>
+                  <Input
+                    nativeInput
+                    size="sm"
+                    value={form.integrationBranch}
+                    placeholder="policy default"
+                    onChange={(event) => patch({ integrationBranch: event.currentTarget.value })}
+                  />
+                </label>
+              </div>
+            </details>
+            {formError ? (
+              <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">
+                {formError}
+              </div>
+            ) : null}
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button size="sm" variant="ghost" onClick={() => submit("defer")} disabled={pending}>
+                Defer
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive-outline"
+                onClick={() => submit("reject")}
+                disabled={pending}
+              >
+                Reject
+              </Button>
+              <Button size="sm" onClick={() => submit("approve")} disabled={pending}>
+                Approve & queue
+              </Button>
+            </div>
+          </div>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
 export function AutopilotPanel({
   snapshot,
   scheduler,
@@ -290,6 +505,12 @@ export function AutopilotPanel({
   onSchedulerArm,
   onSchedulerDisarm,
   onResumeDriver,
+  proposals,
+  focusedProposalId = null,
+  focusedSection = null,
+  reviewPending = false,
+  onReviewProposal,
+  onCloseProposalReview,
 }: {
   snapshot: AutomodeSnapshot | undefined;
   scheduler: GitsSchedulerSnapshot | undefined;
@@ -319,6 +540,13 @@ export function AutopilotPanel({
   onSchedulerArm: () => void;
   onSchedulerDisarm: () => void;
   onResumeDriver: () => void;
+  /** Every known proposal; the deep link focuses one of them by id. */
+  proposals?: ReadonlyArray<HermesProposalCard> | undefined;
+  focusedProposalId?: string | null;
+  focusedSection?: ProposalReviewSection | null;
+  reviewPending?: boolean;
+  onReviewProposal?: (input: HermesProposalReviewInput) => void;
+  onCloseProposalReview?: () => void;
 }) {
   const { readGitsClient, targetEnvironmentId } = useAutopilotGitsClient();
 
@@ -332,6 +560,22 @@ export function AutopilotPanel({
     queryFn: async () => readGitsClient().automode.episodesList({ limit: 25 }),
     refetchInterval: 30_000,
   });
+
+  // ---------------------------------------------------------------------------
+  // Notification deep link → focused proposal review
+  // ---------------------------------------------------------------------------
+  const focusedProposal =
+    focusedProposalId === null
+      ? null
+      : (proposals?.find((proposal) => proposal.id === focusedProposalId) ?? null);
+  // Section links (Automode transitions with no proposal to focus) just scroll; the
+  // section ids below are the only anchors the parser accepts.
+  useEffect(() => {
+    if (focusedSection === null) return;
+    document
+      .getElementById(`autopilot-section-${focusedSection}`)
+      ?.scrollIntoView({ block: "start" });
+  }, [focusedSection]);
 
   // ---------------------------------------------------------------------------
   // Emergency stop + per-goal kill
@@ -466,6 +710,12 @@ export function AutopilotPanel({
 
   return (
     <section className="border-b border-border bg-background">
+      <ProposalReviewSheet
+        proposal={focusedProposal}
+        pending={reviewPending}
+        onClose={() => onCloseProposalReview?.()}
+        onReview={(input) => onReviewProposal?.(input)}
+      />
       <div className="flex flex-col gap-3 border-b border-border/70 px-4 py-4 sm:flex-row sm:items-start sm:justify-between sm:px-5">
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
@@ -575,7 +825,10 @@ export function AutopilotPanel({
         </div>
       ) : null}
 
-      <h3 className="border-b border-border/60 px-4 py-2.5 text-xs font-semibold uppercase text-muted-foreground/80 sm:px-5">
+      <h3
+        id="autopilot-section-policy"
+        className="border-b border-border/60 px-4 py-2.5 text-xs font-semibold uppercase text-muted-foreground/80 sm:px-5"
+      >
         Automation switchboard
       </h3>
       <div className="grid gap-3 border-b border-border/60 px-4 py-4 sm:grid-cols-2 sm:px-5">
@@ -601,7 +854,10 @@ export function AutopilotPanel({
       <div className="grid min-w-0 grid-cols-1 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
         <div className="grid min-w-0 gap-4 border-r border-border/60 px-4 py-4 sm:px-5">
           {scheduler ? (
-            <div className="grid gap-2 rounded-lg border border-border/60 p-3 text-xs">
+            <div
+              id="autopilot-section-scheduler"
+              className="grid gap-2 rounded-lg border border-border/60 p-3 text-xs"
+            >
               <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <span className="font-medium">Night scheduler</span>
                 <StatusPill
@@ -931,7 +1187,7 @@ export function AutopilotPanel({
           )}
         </div>
 
-        <div className="min-w-0">
+        <div className="min-w-0" id="autopilot-section-goals">
           <SectionHeader title="Goal queue" count={filteredGoals.length} />
           <div className="flex flex-wrap gap-1.5 border-b border-border/60 px-4 py-2.5 sm:px-5">
             {GOAL_STATUS_FILTERS.map((filterValue) => (
@@ -1092,6 +1348,7 @@ export function AutopilotPanel({
         </AlertDialogPopup>
       </AlertDialog>
 
+      <div id="autopilot-section-episodes" />
       <SectionHeader title="Overnight results" count={episodesQuery.data?.length ?? 0} />
       {episodesQuery.error ? (
         <div className="px-4 py-3 text-xs text-destructive sm:px-5">
