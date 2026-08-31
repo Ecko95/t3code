@@ -16,8 +16,9 @@ import { ServerConfig } from "../../config.ts";
 import { AutomodeEpisodeLedger } from "../../persistence/Services/AutomodeEpisodeLedger.ts";
 import { HermesAdapter } from "../Services/HermesAdapter.ts";
 import { AutomodeProposalSweep } from "../Services/AutomodeProposalSweep.ts";
+import { AutomodeNotificationDispatcher } from "../Services/AutomodeNotificationDispatcher.ts";
 import { AutomodeSupervisor } from "../Services/AutomodeSupervisor.ts";
-import { HermesTelegramNotifier } from "../Services/HermesTelegramNotifier.ts";
+import { proposalNotificationUrl, automodeSectionUrl } from "./AutomodeNotificationDispatcher.ts";
 import { hasLiveGoalForRepo } from "./HermesAutomodeBridge.ts";
 import { london_instant } from "./GitsSlotScheduler.ts";
 import { repoAllowed } from "./AutomodeSupervisor.ts";
@@ -103,7 +104,7 @@ export const AutomodeProposalSweepLive = Layer.effect(
     const supervisor = yield* AutomodeSupervisor;
     const hermes = yield* HermesAdapter;
     const ledger = yield* AutomodeEpisodeLedger;
-    const notifier = yield* HermesTelegramNotifier;
+    const dispatcher = yield* AutomodeNotificationDispatcher;
     const parsedStart = parseStartMinutes(process.env.GITS_PROPOSAL_SWEEP_START_HHMM);
     if (parsedStart.error !== null) {
       yield* Effect.logWarning("gits.sweep.start-invalid", { detail: parsedStart.error });
@@ -175,6 +176,15 @@ export const AutomodeProposalSweepLive = Layer.effect(
           episodeId: card.episodeId,
           origin: "sweep",
         });
+        // One notification per persisted card, deep-linked to the card itself. Title only —
+        // the prompt and repo evidence stay out of the notification body.
+        yield* dispatcher.notify({
+          key: `proposal-created:${card.id}`,
+          subject: "GITS proposal ready for review",
+          text: card.title,
+          url: proposalNotificationUrl(card.id),
+          policy: snapshot.policy,
+        });
         // enqueueGoal prepends the new goal, so it's always the freshest entry.
         return enqueued.goals[0] ?? null;
       }).pipe(
@@ -242,16 +252,13 @@ export const AutomodeProposalSweepLive = Layer.effect(
             // A sweep night is consumed up front, so a silent zero-goal run means the owner
             // waits a whole day without knowing anything went wrong. Always say so.
             // ponytail: generic message; per-repo reasons live in the gits.sweep.* logs.
-            yield* notifier
-              .notify({
-                subject: "GITS nightly sweep",
-                text: `Sweep ran for ${attemptedRepos} repo(s) but drafted no goals. Check the cockpit logs (gits.sweep.*) for reasons.`,
-              })
-              .pipe(
-                Effect.catchCause((cause) =>
-                  Effect.logWarning("gits.sweep.telegram-failed", { cause: Cause.pretty(cause) }),
-                ),
-              );
+            yield* dispatcher.notify({
+              key: `sweep-no-goals:${now.dateKey}`,
+              subject: "GITS nightly sweep",
+              text: `Sweep ran for ${attemptedRepos} repo(s) but drafted no goals. Check the cockpit logs (gits.sweep.*) for reasons.`,
+              url: automodeSectionUrl("goals"),
+              policy,
+            });
           }
           if (newGoals.length > 0) {
             const goalLines = newGoals.map(
@@ -268,13 +275,13 @@ export const AutomodeProposalSweepLive = Layer.effect(
                   "",
                   "Reply: STOP to halt automode.",
                 ].join("\n");
-            yield* notifier
-              .notify({ subject: "GITS nightly sweep", text })
-              .pipe(
-                Effect.catchCause((cause) =>
-                  Effect.logWarning("gits.sweep.telegram-failed", { cause: Cause.pretty(cause) }),
-                ),
-              );
+            yield* dispatcher.notify({
+              key: `sweep-goals:${now.dateKey}`,
+              subject: "GITS nightly sweep",
+              text,
+              url: automodeSectionUrl("goals"),
+              policy,
+            });
           }
         }).pipe(
           Effect.catchCause((cause) =>

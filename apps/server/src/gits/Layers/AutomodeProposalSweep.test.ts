@@ -21,7 +21,7 @@ import { AutomodeSupervisor } from "../Services/AutomodeSupervisor.ts";
 import { AutomodeUsageMeter } from "../Services/AutomodeUsageMeter.ts";
 import { DelamainAdapter } from "../Services/DelamainAdapter.ts";
 import { HermesAdapter } from "../Services/HermesAdapter.ts";
-import { HermesTelegramNotifier } from "../Services/HermesTelegramNotifier.ts";
+import { AutomodeNotificationDispatcher } from "../Services/AutomodeNotificationDispatcher.ts";
 import { AutomodeProposalSweepLive } from "./AutomodeProposalSweep.ts";
 import { AutomodeSupervisorLive } from "./AutomodeSupervisor.ts";
 import { AutomodeSupervisorTestRoutingLayer } from "./AutomodeSupervisor.testHelpers.ts";
@@ -157,7 +157,9 @@ function makeLayer(hermesOptions: HermesOptions = {}) {
   const ledger = Layer.mock(AutomodeEpisodeLedger)({
     list_episodes: () => Effect.succeed(hermesOptions.episodes ?? []),
   });
-  const notifier = Layer.mock(HermesTelegramNotifier)({
+  // Channel routing/dedup is the dispatcher's own suite; here we record what the sweep
+  // asks to be delivered.
+  const notifier = Layer.mock(AutomodeNotificationDispatcher)({
     notify: ({ subject, text }) =>
       Effect.sync(() => {
         hermesOptions.telegramSent?.push(`${subject}\n${text}`);
@@ -354,8 +356,10 @@ describe("AutomodeProposalSweep", () => {
         assert.equal(goal.status, "waiting-approval");
         assert.isNull(goal.approvedAt);
 
-        assert.equal(telegramSent.length, 1);
-        const message = telegramSent[0] ?? "";
+        // Two notifications now: one per persisted proposal card, then the sweep summary.
+        assert.equal(telegramSent.length, 2);
+        assert.include(telegramSent[0] ?? "", "GITS proposal ready for review");
+        const message = telegramSent[1] ?? "";
         assert.include(message, `[${goal.id.replace(/^goal-/, "").slice(0, 4)}]`);
         assert.match(message, /Improve sweep repo — sweep-repo/);
         assert.include(message, "Reply: APPROVE <code> · REJECT <code>");
@@ -404,16 +408,14 @@ describe("AutomodeProposalSweep", () => {
         assert.equal(snapshot.goals[0]!.status, "queued");
         assert.isNull(snapshot.goals[0]!.approvedAt);
 
-        assert.equal(telegramSent.length, 1);
-        assert.include(
-          telegramSent[0] ?? "",
-          `[${snapshot.goals[0]!.id.replace(/^goal-/, "").slice(0, 4)}]`,
-        );
+        assert.equal(telegramSent.length, 2);
+        const summary = telegramSent[1] ?? "";
+        assert.include(summary, `[${snapshot.goals[0]!.id.replace(/^goal-/, "").slice(0, 4)}]`);
         // With confirmation off the goals are already queued for autonomous dispatch —
         // the message must not advertise an APPROVE/REJECT gate that does nothing.
-        assert.notInclude(telegramSent[0] ?? "", "APPROVE");
-        assert.include(telegramSent[0] ?? "", "no confirmation required");
-        assert.include(telegramSent[0] ?? "", "STOP");
+        assert.notInclude(summary, "APPROVE");
+        assert.include(summary, "no confirmation required");
+        assert.include(summary, "STOP");
       }).pipe(Effect.provide(makeLayer({ telegramSent })));
     },
   );

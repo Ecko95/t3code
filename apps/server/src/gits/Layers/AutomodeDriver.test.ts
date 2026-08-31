@@ -25,8 +25,8 @@ import { AutomodeUsageMeter } from "../Services/AutomodeUsageMeter.ts";
 import { AutomodeDriver } from "../Services/AutomodeDriver.ts";
 import { AutomodeProposalSweep } from "../Services/AutomodeProposalSweep.ts";
 import { AutomodeTelegramDigest } from "../Services/AutomodeTelegramDigest.ts";
+import { AutomodeNotificationDispatcher } from "../Services/AutomodeNotificationDispatcher.ts";
 import {
-  HermesTelegramNotifier,
   HermesTelegramNotifierError,
   type HermesTelegramNotifierShape,
 } from "../Services/HermesTelegramNotifier.ts";
@@ -294,12 +294,15 @@ function makeLayer(
   const proposalSweep = Layer.mock(AutomodeProposalSweep)({
     tick: () => Effect.void,
   });
-  const notifier = Layer.mock(HermesTelegramNotifier)({
+  // The driver talks to the dispatcher, not Telegram directly — channel routing and dedup
+  // are covered by AutomodeNotificationDispatcher.test.ts. Here we only care that the
+  // driver emits the alert at all, and that a delivery failure stays non-fatal.
+  const notifier = Layer.mock(AutomodeNotificationDispatcher)({
     notify: (input) =>
       Effect.suspend(() => {
-        options?.onNotify?.(input);
+        options?.onNotify?.({ subject: input.subject, text: input.text });
         return options?.notifyError === undefined ? Effect.void : Effect.fail(options.notifyError);
-      }),
+      }).pipe(Effect.catchCause(() => Effect.void)),
   });
   const config = ServerConfig.layerTest(
     process.cwd(),

@@ -23,7 +23,8 @@ import { GitsReviewPipeline } from "../Services/GitsReviewPipeline.ts";
 import { GitsSlotScheduler } from "../Services/GitsSlotScheduler.ts";
 import { AUTOMODE_BASE_REF, AutomodeLanding } from "../Services/AutomodeLanding.ts";
 import { AutomodeHeldPr } from "../Services/AutomodeHeldPr.ts";
-import { HermesTelegramNotifier } from "../Services/HermesTelegramNotifier.ts";
+import { AutomodeNotificationDispatcher } from "../Services/AutomodeNotificationDispatcher.ts";
+import { automodeSectionUrl } from "./AutomodeNotificationDispatcher.ts";
 import { AutomodeEpisodeLedger } from "../../persistence/Services/AutomodeEpisodeLedger.ts";
 import { decide_automode_gate } from "./AutomodeReviewGate.ts";
 
@@ -92,20 +93,28 @@ export const AutomodeDriverLive = Layer.effect(
     const scheduler = yield* GitsSlotScheduler;
     const telegramDigest = yield* AutomodeTelegramDigest;
     const proposalSweep = yield* AutomodeProposalSweep;
-    const telegramNotifier = yield* HermesTelegramNotifier;
+    const notificationDispatcher = yield* AutomodeNotificationDispatcher;
 
     const toDriverError = (message: string) => (cause: unknown) =>
       new AutomodeSupervisorError({ message, cause });
 
+    // Every driver alert routes through the dispatcher, so the operator's independent
+    // GITS/PWA and Telegram toggles apply uniformly and each transition is delivered at
+    // most once per channel. `key` must be stable per transition (goal/PR identifier) —
+    // the driver re-observes the same state every 5 s tick.
     const notify = (input: {
+      readonly key: string;
       readonly subject: string;
       readonly title: string;
       readonly goalId: string | null;
       readonly reason: string;
       readonly prUrl?: string | null;
     }) =>
-      telegramNotifier
-        .notify({
+      Effect.gen(function* () {
+        // Cheap stateRef read; halt() fires from paths that have no snapshot in scope.
+        const policy = yield* supervisor.getPolicy();
+        yield* notificationDispatcher.notify({
+          key: input.key,
           subject: input.subject,
           text: [
             `Title: ${input.title}`,
@@ -115,12 +124,14 @@ export const AutomodeDriverLive = Layer.effect(
               ? []
               : [`PR URL: ${input.prUrl}`]),
           ].join("\n"),
-        })
-        .pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("gits.automode.telegram.alert-failed", { cause }),
-          ),
-        );
+          url: input.prUrl ?? automodeSectionUrl("goals"),
+          policy,
+        });
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("gits.automode.telegram.alert-failed", { cause }),
+        ),
+      );
 
     // Same-reason halt alerts are suppressed for a cooldown window: a driver that
     // re-halts into the same failure (e.g. operator keeps resuming, or a gate keeps
@@ -138,6 +149,9 @@ export const AutomodeDriverLive = Layer.effect(
             }
             yield* Ref.set(lastHaltAlertRef, { reason, at: now });
             yield* notify({
+              // Reason is part of the key: a driver that halts again for a DIFFERENT
+              // reason is a new transition the operator needs to see.
+              key: `driver-halted:${goal?.id ?? "none"}:${reason}`,
               subject: "GITS automode halted",
               title: goal?.title ?? "Automode driver",
               goalId: goal?.id ?? null,
@@ -185,6 +199,7 @@ export const AutomodeDriverLive = Layer.effect(
           }
           yield* supervisor.recordHeldPr({ url: result.url, number: result.number });
           yield* notify({
+            key: `held-pr-created:${result.number}`,
             subject: "GITS automode held PR created",
             title: `automode: held PR for ${policy.integrationBranch}`,
             goalId: snapshot.goals.find((goal) => goal.status === "completed")?.id ?? null,
@@ -216,6 +231,27 @@ export const AutomodeDriverLive = Layer.effect(
         }
 
         const snapshot = yield* supervisor.getSnapshot();
+
+        // 0) Attention pass: a goal parked at waiting-approval, blocked, or failed needs the
+        // operator. This is observation, not transition detection — the driver re-sees the
+        // same goal every tick — so the dispatcher's per-key dedup is what makes it fire
+        // exactly once per goal per status.
+        for (const goal of snapshot.goals) {
+          if (
+            goal.status !== "waiting-approval" &&
+            goal.status !== "blocked" &&
+            goal.status !== "failed"
+          ) {
+            continue;
+          }
+          yield* notify({
+            key: `goal-${goal.status}:${goal.id}`,
+            subject: `GITS goal ${goal.status}`,
+            title: goal.title,
+            goalId: goal.id,
+            reason: goal.blockedReason ?? `Goal is ${goal.status}.`,
+          });
+        }
 
         // 1) Reconcile the in-flight goal (sequential: at most one running).
         const running = snapshot.goals.find(
@@ -462,6 +498,7 @@ export const AutomodeDriverLive = Layer.effect(
                 return;
               }
               yield* notify({
+                key: `goal-landed:${running.id}`,
                 subject: "GITS automode goal landed",
                 title: running.title,
                 goalId: running.id,

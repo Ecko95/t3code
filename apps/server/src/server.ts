@@ -80,6 +80,7 @@ import { OpenGsdCliAdapterLive } from "./gits/Layers/OpenGsdCliAdapter.ts";
 import { AutomodeSupervisorLive } from "./gits/Layers/AutomodeSupervisor.ts";
 import { AutomodeUsageMeterLive } from "./gits/Layers/AutomodeUsageMeter.ts";
 import { AutomodeDriverLive } from "./gits/Layers/AutomodeDriver.ts";
+import { AutomodeNotificationDispatcherLive } from "./gits/Layers/AutomodeNotificationDispatcher.ts";
 import { AutomodeProposalSweepLive } from "./gits/Layers/AutomodeProposalSweep.ts";
 import { AutomodeTelegramDigestLive } from "./gits/Layers/AutomodeTelegramDigest.ts";
 import { GitsSlotSchedulerLive } from "./gits/Layers/GitsSlotScheduler.ts";
@@ -363,9 +364,17 @@ const HermesAdapterLayerLive = HermesCliAdapterLive.pipe(
   Layer.provide(HermesTelegramNotifierLive),
 );
 
+const AutomodeNotificationDispatcherLayerLive = AutomodeNotificationDispatcherLive.pipe(
+  Layer.provide(
+    PushNotificationLayerLive.pipe(Layer.provide(WebPushSubscriptionRepositoryLayerLive)),
+  ),
+  Layer.provide(HermesTelegramNotifierLive),
+);
+
 const AutomodeProposalSweepLayerLive = AutomodeProposalSweepLive.pipe(
   Layer.provide(AutomodeSupervisorLayerLive),
   Layer.provide(HermesAdapterLayerLive),
+  Layer.provide(AutomodeNotificationDispatcherLayerLive),
 );
 
 const AutomodeDriverLayerLive = AutomodeDriverLive.pipe(
@@ -377,7 +386,7 @@ const AutomodeDriverLayerLive = AutomodeDriverLive.pipe(
   Layer.provide(AutomodeEpisodeLedgerLayerLive),
   Layer.provide(AutomodeTelegramDigestLayerLive),
   Layer.provide(AutomodeProposalSweepLayerLive),
-  Layer.provide(HermesTelegramNotifierLive),
+  Layer.provide(AutomodeNotificationDispatcherLayerLive),
   Layer.provide(
     GitsReviewPipelineLive.pipe(
       Layer.provide(GitsCodexVerifierAdapterLive),
