@@ -149,6 +149,7 @@ interface MakeLayerOptions {
   readonly onDigestTick?: () => void;
   readonly onNotify?: (input: Parameters<HermesTelegramNotifierShape["notify"]>[0]) => void;
   readonly notifyError?: HermesTelegramNotifierError;
+  readonly onCheckStartAllowed?: () => void;
 }
 
 // Mutable holder so a test can change what listPeers returns between ticks.
@@ -245,7 +246,11 @@ function makeLayer(
       }),
   });
   const scheduler = Layer.mock(GitsSlotScheduler)({
-    checkStartAllowed: () => Effect.succeed(options?.gateResult ?? { allowed: true as const }),
+    checkStartAllowed: () =>
+      Effect.sync(() => {
+        options?.onCheckStartAllowed?.();
+        return options?.gateResult ?? { allowed: true as const };
+      }),
     recordGoalStart: (input) =>
       Effect.suspend(() => {
         options?.onRecordGoalStart?.(input);
@@ -395,6 +400,83 @@ describe("AutomodeDriver", () => {
       const goal = snapshot.goals.find((g) => g.title === "First");
       assert.equal(goal?.status, "running");
       assert.equal(goal?.peerId, "peer-driver");
+    }).pipe(Effect.provide(makeLayer(peerStatus)));
+  });
+
+  // it.effect runs on a TestClock pinned at the epoch, and this layer forks a polling
+  // fiber that deadlocks on TestClock.setTime — so "due" is expressed as the epoch itself
+  // and "not due" as any later date.
+  const DUE = "1970-01-01T00:00:00.000Z";
+  const NOT_DUE = "2026-01-08T00:00:00.000Z";
+
+  // notBefore is a gate on an ordinary queued goal, not a second scheduler: before the
+  // time passes the goal simply stays queued and the driver moves on.
+  it.effect("leaves a goal queued until its notBefore time passes", () => {
+    const peerStatus = { current: "absent" as PeerStatus | "absent" };
+    return Effect.gen(function* () {
+      const supervisor = yield* AutomodeSupervisor;
+      const driver = yield* AutomodeDriver;
+      yield* armAutonomous(supervisor);
+      yield* supervisor.enqueueGoal({
+        title: "Later",
+        repo: "/tmp/source-repo",
+        prompt: "not yet",
+        notBefore: NOT_DUE,
+      });
+
+      yield* driver.tickOnce();
+
+      const goal = (yield* supervisor.getSnapshot()).goals.find((g) => g.title === "Later");
+      assert.equal(goal?.status, "queued");
+      assert.isNull(goal?.peerId ?? null);
+    }).pipe(Effect.provide(makeLayer(peerStatus)));
+  });
+
+  it.effect("dispatches a goal whose notBefore has passed, still through the start gate", () => {
+    const peerStatus = { current: "absent" as PeerStatus | "absent" };
+    let gateChecks = 0;
+    return Effect.gen(function* () {
+      const supervisor = yield* AutomodeSupervisor;
+      const driver = yield* AutomodeDriver;
+      yield* armAutonomous(supervisor);
+      yield* supervisor.enqueueGoal({
+        title: "Due",
+        repo: "/tmp/source-repo",
+        prompt: "go",
+        notBefore: DUE,
+      });
+
+      yield* driver.tickOnce();
+
+      const goal = (yield* supervisor.getSnapshot()).goals.find((g) => g.title === "Due");
+      assert.equal(goal?.status, "running");
+      // The not-before gate is additive: GitsSlotScheduler still decides.
+      assert.equal(gateChecks, 1);
+    }).pipe(
+      Effect.provide(makeLayer(peerStatus, { onCheckStartAllowed: () => (gateChecks += 1) })),
+    );
+  });
+
+  // A due goal must not be starved by an earlier-created goal that is not due yet.
+  it.effect("skips a not-yet-due goal in favour of an older due one", () => {
+    const peerStatus = { current: "absent" as PeerStatus | "absent" };
+    return Effect.gen(function* () {
+      const supervisor = yield* AutomodeSupervisor;
+      const driver = yield* AutomodeDriver;
+      yield* armAutonomous(supervisor);
+      yield* supervisor.enqueueGoal({
+        title: "Blocked by time",
+        repo: "/tmp/source-repo",
+        prompt: "later",
+        notBefore: NOT_DUE,
+      });
+      yield* supervisor.enqueueGoal({ title: "Ready", repo: "/tmp/source-repo", prompt: "now" });
+
+      yield* driver.tickOnce();
+
+      const snapshot = yield* supervisor.getSnapshot();
+      assert.equal(snapshot.goals.find((g) => g.title === "Ready")?.status, "running");
+      assert.equal(snapshot.goals.find((g) => g.title === "Blocked by time")?.status, "queued");
     }).pipe(Effect.provide(makeLayer(peerStatus)));
   });
 

@@ -9,6 +9,7 @@ import type {
   DelamainPeerListResult,
   HermesExecutionDraft,
   HermesProposalCard,
+  HermesProposalReviewInput,
   HermesProposalStatus,
 } from "@t3tools/contracts";
 
@@ -19,7 +20,11 @@ import { AutomodeUsageMeter } from "../Services/AutomodeUsageMeter.ts";
 import { DelamainAdapter } from "../Services/DelamainAdapter.ts";
 import { AutomodeSupervisorLive } from "./AutomodeSupervisor.ts";
 import { AutomodeSupervisorTestRoutingLayer } from "./AutomodeSupervisor.testHelpers.ts";
-import { decideProposalWithAutomodeBridge } from "./HermesAutomodeBridge.ts";
+import { applyProposalEdits } from "./HermesCliAdapter.ts";
+import {
+  decideProposalWithAutomodeBridge,
+  reviewProposalWithAutomodeBridge,
+} from "./HermesAutomodeBridge.ts";
 
 const peer: DelamainPeer = {
   id: "peer-bridge",
@@ -160,6 +165,16 @@ function makeFakeHermes(options?: {
         Effect.sync(() => {
           proposal = {
             ...proposal,
+            status: input.decision === "approve" ? ("approved" as const) : ("rejected" as const),
+          };
+          return proposal;
+        }),
+      // Mirrors HermesCliAdapter.reviewProposal: edits land on the stored card BEFORE the
+      // decision, so a later draftFromProposal/enqueue reads the edited values.
+      reviewProposal: (input: HermesProposalReviewInput) =>
+        Effect.sync(() => {
+          proposal = {
+            ...applyProposalEdits(proposal, input.edits),
             status: input.decision === "approve" ? ("approved" as const) : ("rejected" as const),
           };
           return proposal;
@@ -332,6 +347,112 @@ describe("decideProposalWithAutomodeBridge", () => {
         });
       }
 
+      assert.equal((yield* supervisor.getSnapshot()).goals.length, 0);
+    }).pipe(Effect.provide(makeSupervisorLayer())),
+  );
+});
+
+describe("reviewProposalWithAutomodeBridge", () => {
+  // The whole point of the review sheet: what the operator typed is what runs.
+  it.effect("carries edited title, prompt, repo, model, and settings onto exactly one goal", () =>
+    Effect.gen(function* () {
+      const supervisor = yield* armAutonomous;
+      const { hermes, draftCallCount } = makeFakeHermes({
+        // The real adapter derives the draft from the edited card; the fake is canned, so
+        // pin the edited prompt/repo here to prove they reach the goal.
+        draft: { ...defaultDraft, prompt: "Edited prompt.", repo: "/tmp/source-repo" },
+      });
+
+      const reviewed = yield* reviewProposalWithAutomodeBridge(hermes, supervisor, {
+        proposalId: "proposal-1",
+        decision: "approve",
+        edits: {
+          title: "Edited title",
+          prompt: "Edited prompt.",
+          projectDir: "/tmp/source-repo",
+          model: "gpt-5.4",
+          notBefore: "2026-01-02T03:00:00.000Z",
+          maxRuntimeMinutes: 45,
+          verificationCommands: [{ label: "typecheck", cmd: ["bun", "typecheck"] }],
+          integrationBranch: "auto/gits",
+        },
+      });
+      assert.equal(reviewed.status, "approved");
+
+      const snapshot = yield* supervisor.getSnapshot();
+      assert.equal(snapshot.goals.length, 1);
+      const goal = snapshot.goals[0]!;
+      assert.equal(goal.title, "Edited title");
+      assert.equal(goal.prompt, "Edited prompt.");
+      assert.equal(goal.repo, "/tmp/source-repo");
+      assert.equal(goal.model, "gpt-5.4");
+      assert.equal(goal.notBefore, "2026-01-02T03:00:00.000Z");
+      assert.equal(goal.maxRuntimeMinutes, 45);
+      assert.equal(goal.verificationCommands[0]?.label, "typecheck");
+      assert.equal(goal.integrationBranch, "auto/gits");
+      // Queued, not dispatched — approval never bypasses the scheduler or policy gates.
+      assert.equal(goal.status, "queued");
+      assert.equal(goal.origin, "proposal");
+      assert.equal(goal.episodeId, "epi-proposal-1");
+      assert.equal(draftCallCount(), 1);
+    }).pipe(Effect.provide(makeSupervisorLayer())),
+  );
+
+  // A double-click on Approve, or a retry after a flaky RPC, must not queue the work twice.
+  it.effect("re-approving does not enqueue a second goal", () =>
+    Effect.gen(function* () {
+      const supervisor = yield* armAutonomous;
+      const { hermes } = makeFakeHermes();
+
+      yield* reviewProposalWithAutomodeBridge(hermes, supervisor, {
+        proposalId: "proposal-1",
+        decision: "approve",
+      });
+      yield* reviewProposalWithAutomodeBridge(hermes, supervisor, {
+        proposalId: "proposal-1",
+        decision: "approve",
+      });
+
+      assert.equal((yield* supervisor.getSnapshot()).goals.length, 1);
+    }).pipe(Effect.provide(makeSupervisorLayer())),
+  );
+
+  // Unlike the decide bridge, review-approve is an explicit operator gesture: it queues
+  // even with autoEnqueueApprovedProposals off, because that flag governs the *automatic*
+  // path, not a human pressing Approve in the review sheet.
+  it.effect("queues even when autoEnqueueApprovedProposals is off", () =>
+    Effect.gen(function* () {
+      const supervisor = yield* AutomodeSupervisor;
+      yield* supervisor.updatePolicy({
+        mode: "supervised",
+        killSwitchEnabled: true,
+        allowedRepos: ["/tmp/source-repo"],
+        autoEnqueueApprovedProposals: false,
+      });
+      const { hermes } = makeFakeHermes();
+
+      yield* reviewProposalWithAutomodeBridge(hermes, supervisor, {
+        proposalId: "proposal-1",
+        decision: "approve",
+      });
+
+      const snapshot = yield* supervisor.getSnapshot();
+      assert.equal(snapshot.goals.length, 1);
+      // Queued behind a live kill switch: it will not run until the operator arms automode.
+      assert.equal(snapshot.goals[0]!.status, "queued");
+    }).pipe(Effect.provide(makeSupervisorLayer())),
+  );
+
+  it.effect("defer and reject never enqueue", () =>
+    Effect.gen(function* () {
+      const supervisor = yield* armAutonomous;
+      for (const decision of ["defer", "reject"] as const) {
+        const { hermes } = makeFakeHermes();
+        yield* reviewProposalWithAutomodeBridge(hermes, supervisor, {
+          proposalId: "proposal-1",
+          decision,
+        });
+      }
       assert.equal((yield* supervisor.getSnapshot()).goals.length, 0);
     }).pipe(Effect.provide(makeSupervisorLayer())),
   );
