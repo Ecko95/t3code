@@ -26,6 +26,7 @@ import {
   hermesModelCommand,
   hermesProposalRequiresApproval,
   isLegacyProviderSetupProposalArtifact,
+  listProposals,
   makeCodexChainAlert,
   makeChat,
   makeHermesCliAdapter,
@@ -37,6 +38,7 @@ import {
   parseHermesModelStatus,
   readCodexAuthStatus,
   resolveHermesHome,
+  reviewProposal,
 } from "./HermesCliAdapter.ts";
 import {
   AutomodeSupervisor,
@@ -226,28 +228,12 @@ describe("HermesCliAdapter cockpit chat", () => {
   it("recognizes legacy provider setup proposal artifacts", () => {
     expect(
       isLegacyProviderSetupProposalArtifact({
-        id: "hermes-legacy",
-        episodeId: "epi-legacy-hermes-legacy",
         title: "No inference provider configured. Run 'hermes model' to choose a provider and",
         summary: "model, or set an API key",
         detail:
           "No inference provider configured. Run 'hermes model' to choose a provider and model.",
-        evidence: ["Generated from Motoko/Hermes proposal output."],
-        scope: ["Read-only inspection."],
-        risk: "blocked",
-        actionKind: "read-only",
-        status: "blocked",
-        requiresApproval: false,
-        recommendedExecutor: "none",
-        verificationPlan: ["Confirm no repo mutation occurred."],
-        nextCommandOrPrompt: null,
         blockedReason: "Hermes cockpit chat did not complete.",
         source: "hermes cockpit chat",
-        projectDir: "/tmp/gits",
-        decisionReason: null,
-        decidedAt: null,
-        createdAt: "2026-06-03T00:00:00.000Z",
-        updatedAt: "2026-06-03T00:00:00.000Z",
       }),
     ).toBe(true);
   });
@@ -255,27 +241,11 @@ describe("HermesCliAdapter cockpit chat", () => {
   it("keeps ordinary proposals visible", () => {
     expect(
       isLegacyProviderSetupProposalArtifact({
-        id: "hermes-normal",
-        episodeId: "epi-legacy-hermes-normal",
         title: "Inspect build provenance drift",
         summary: "Capture the deploy metadata mismatch and propose a cleanup.",
         detail: "The hosted worktree metadata is stale and should be refreshed.",
-        evidence: ["Operator request was classified by GITS before Hermes response."],
-        scope: ["Selected project root: /tmp/gits", "Read-only analysis and recommendation."],
-        risk: "low",
-        actionKind: "read-only",
-        status: "proposed",
-        requiresApproval: false,
-        recommendedExecutor: "none",
-        verificationPlan: ["Review the cited evidence in GITS before taking action."],
-        nextCommandOrPrompt: null,
         blockedReason: null,
         source: "hermes cockpit chat",
-        projectDir: "/tmp/gits",
-        decisionReason: null,
-        decidedAt: null,
-        createdAt: "2026-06-03T00:00:00.000Z",
-        updatedAt: "2026-06-03T00:00:00.000Z",
       }),
     ).toBe(false);
   });
@@ -368,6 +338,76 @@ describe("HermesCliAdapter sweep draft derivation", () => {
     await Effect.runPromise(decideProposal({ proposalId: card.id, decision: "approve" }));
     const draft = await Effect.runPromise(draftFromProposal({ proposalId: card.id }));
     expect(draft.kind).toBe("verification");
+  });
+
+  // reviewProposal must persist edits and the decision in ONE write: a review that lands
+  // "approved" without the operator's edited prompt would queue the wrong work.
+  it("persists review edits together with the decision", async () => {
+    const { card, repo } = await seed("worktree-spawn");
+    const reviewed = await Effect.runPromise(
+      reviewProposal({
+        proposalId: card.id,
+        decision: "approve",
+        edits: {
+          title: "Edited sweep improvement",
+          prompt: "Do exactly this instead.",
+          projectDir: repo,
+          model: "gpt-5.4",
+          notBefore: "2026-01-02T03:00:00.000Z",
+          maxRuntimeMinutes: 45,
+          verificationCommands: [{ label: "typecheck", cmd: ["bun", "typecheck"] }],
+          integrationBranch: "auto/gits",
+        },
+      }),
+    );
+    expect(reviewed.status).toBe("approved");
+    expect(reviewed.title).toBe("Edited sweep improvement");
+
+    // Re-read through the store, not the return value: the edits must be on disk before
+    // the bridge reads the card back to build a goal.
+    const stored = (await Effect.runPromise(listProposals())).proposals.find(
+      (candidate) => candidate.id === card.id,
+    );
+    expect(stored?.status).toBe("approved");
+    expect(stored?.title).toBe("Edited sweep improvement");
+    expect(stored?.nextCommandOrPrompt).toBe("Do exactly this instead.");
+    expect(stored?.model).toBe("gpt-5.4");
+    expect(stored?.notBefore).toBe("2026-01-02T03:00:00.000Z");
+    expect(stored?.maxRuntimeMinutes).toBe(45);
+    expect(stored?.verificationCommands[0]?.cmd).toEqual(["bun", "typecheck"]);
+    expect(stored?.integrationBranch).toBe("auto/gits");
+
+    // The edited prompt must reach the draft the bridge turns into a goal.
+    const draft = await Effect.runPromise(draftFromProposal({ proposalId: card.id }));
+    expect(draft.prompt).toBe("Do exactly this instead.");
+  });
+
+  it("leaves unedited fields alone and still records a defer decision", async () => {
+    const { card } = await seed("worktree-spawn");
+    const reviewed = await Effect.runPromise(
+      reviewProposal({ proposalId: card.id, decision: "defer", edits: { maxRuntimeMinutes: 20 } }),
+    );
+    expect(reviewed.status).toBe("deferred");
+    expect(reviewed.title).toBe(card.title);
+    expect(reviewed.nextCommandOrPrompt).toBe(card.nextCommandOrPrompt);
+    expect(reviewed.maxRuntimeMinutes).toBe(20);
+  });
+
+  it("normalizes a legacy stored card that predates the execution settings", async () => {
+    const home = await Fs.mkdtemp(Path.join(Os.tmpdir(), "gits-legacy-proposal-"));
+    vi.stubEnv("GITS_HERMES_HOME", home);
+    await Fs.writeFile(
+      Path.join(home, "gits-proposals.json"),
+      JSON.stringify([{ id: "legacy-1", title: "Legacy card" }], null, 2),
+      "utf8",
+    );
+    const stored = (await Effect.runPromise(listProposals())).proposals[0];
+    expect(stored?.model).toBeNull();
+    expect(stored?.notBefore).toBeNull();
+    expect(stored?.maxRuntimeMinutes).toBeNull();
+    expect(stored?.verificationCommands).toEqual([]);
+    expect(stored?.integrationBranch).toBeNull();
+    expect(stored?.sourceThreadId).toBeNull();
   });
 });
 

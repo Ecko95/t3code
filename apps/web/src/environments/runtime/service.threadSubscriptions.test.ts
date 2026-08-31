@@ -238,6 +238,7 @@ vi.mock("@t3tools/client-runtime", async (importOriginal) => {
         inspectGits: vi.fn(),
         chat: vi.fn(),
         decideProposal: vi.fn(),
+        reviewProposal: vi.fn(),
         writeProjectContext: vi.fn(),
         draftFromProposal: vi.fn(),
         runSchedule: vi.fn(),

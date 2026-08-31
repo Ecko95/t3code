@@ -261,6 +261,7 @@ export interface WsRpcClient {
       readonly inspectGits: RpcUnaryMethod<typeof WS_METHODS.gitsHermesInspectGits>;
       readonly chat: RpcUnaryMethod<typeof WS_METHODS.gitsHermesChat>;
       readonly decideProposal: RpcUnaryMethod<typeof WS_METHODS.gitsHermesDecideProposal>;
+      readonly reviewProposal: RpcUnaryMethod<typeof WS_METHODS.gitsHermesReviewProposal>;
       readonly writeProjectContext: RpcUnaryMethod<typeof WS_METHODS.gitsHermesWriteProjectContext>;
       readonly draftFromProposal: RpcUnaryMethod<typeof WS_METHODS.gitsHermesDraftFromProposal>;
       readonly runSchedule: RpcUnaryMethod<typeof WS_METHODS.gitsHermesRunSchedule>;
@@ -578,6 +579,8 @@ export function createWsRpcClient(
         chat: (input) => transport.request((client) => client[WS_METHODS.gitsHermesChat](input)),
         decideProposal: (input) =>
           transport.request((client) => client[WS_METHODS.gitsHermesDecideProposal](input)),
+        reviewProposal: (input) =>
+          transport.request((client) => client[WS_METHODS.gitsHermesReviewProposal](input)),
         writeProjectContext: (input) =>
           transport.request((client) => client[WS_METHODS.gitsHermesWriteProjectContext](input)),
         draftFromProposal: (input) =>

@@ -33,6 +33,8 @@ const BASE_POLICY: AutomodePolicy = {
   motokoAuthority: "observe",
   telegramDigestEnabled: true,
   sweepRequiresConfirmation: true,
+  gitsNotificationsEnabled: true,
+  telegramNotificationsEnabled: false,
   updatedAt: "2026-07-20T00:00:00.000Z",
 };
 

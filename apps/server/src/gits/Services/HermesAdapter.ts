@@ -16,6 +16,7 @@ import type {
   HermesProposalCard,
   HermesProposalDecisionInput,
   HermesProposalListResult,
+  HermesProposalReviewInput,
   HermesScheduleRunInput,
   HermesScheduleRunResult,
   HermesSafeConfig,
@@ -46,6 +47,10 @@ export interface HermesAdapterShape {
   readonly chat: (input: HermesChatInput) => Effect.Effect<HermesChatResult, HermesAdapterError>;
   readonly decideProposal: (
     input: HermesProposalDecisionInput,
+  ) => Effect.Effect<HermesProposalCard, HermesAdapterError>;
+  /** Atomic edit-then-decide used by the cockpit review sheet. */
+  readonly reviewProposal: (
+    input: HermesProposalReviewInput,
   ) => Effect.Effect<HermesProposalCard, HermesAdapterError>;
   readonly writeProjectContext: (
     input: HermesProjectContextInput,

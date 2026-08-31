@@ -26,6 +26,7 @@ import {
   type HermesCommandCheck,
   type HermesCommandResult,
   type HermesCommandStatus,
+  type GitsVerifyCommand,
   type HermesHealthStatus,
   type HermesLogTailResult,
   type HermesModelStatus,
@@ -34,7 +35,9 @@ import {
   type HermesPolicySnapshot,
   type HermesProposalActionKind,
   type HermesProposalCard,
+  type HermesProposalEdits,
   type HermesProposalListResult,
+  type HermesProposalReviewInput,
   type HermesProjectContextResult,
   type HermesSafeConfig,
   type HermesScheduleKind,
@@ -1012,7 +1015,9 @@ function providerSetupDetail(hermesHome: string): {
   };
 }
 
-export function isLegacyProviderSetupProposalArtifact(proposal: HermesProposalCard): boolean {
+export function isLegacyProviderSetupProposalArtifact(
+  proposal: Pick<HermesProposalCard, "title" | "summary" | "detail" | "blockedReason" | "source">,
+): boolean {
   const haystack = [proposal.title, proposal.summary, proposal.detail, proposal.blockedReason]
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     .join("\n");
@@ -1034,6 +1039,34 @@ function arrayFromUnknown(value: unknown, fallback: ReadonlyArray<string>): stri
 
 function nullableStringFromUnknown(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function nonNegativeIntFromUnknown(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+/** Lenient read of persisted verification commands; a malformed entry is dropped, not fatal. */
+function verifyCommandsFromUnknown(value: unknown): GitsVerifyCommand[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry): GitsVerifyCommand[] => {
+    if (typeof entry !== "object" || entry === null) {
+      return [];
+    }
+    const record = entry as Record<string, unknown>;
+    const label = nullableStringFromUnknown(record.label);
+    const cmd = Array.isArray(record.cmd)
+      ? record.cmd
+          .filter((arg): arg is string => typeof arg === "string" && arg.trim().length > 0)
+          .map((arg) => arg.trim())
+      : [];
+    if (label === null || cmd.length === 0) {
+      return [];
+    }
+    const timeoutSeconds = nonNegativeIntFromUnknown(record.timeoutSeconds);
+    return [{ label, cmd, ...(timeoutSeconds === null ? {} : { timeoutSeconds }) }];
+  });
 }
 
 export function normalizeProposal(value: unknown): HermesProposalCard | null {
@@ -1109,6 +1142,14 @@ export function normalizeProposal(value: unknown): HermesProposalCard | null {
     projectDir: nullableStringFromUnknown(record.projectDir),
     decisionReason: nullableStringFromUnknown(record.decisionReason),
     decidedAt: nullableStringFromUnknown(record.decidedAt),
+    // Execution settings (cockpit review sheet). Legacy cards predate them; the store is
+    // deliberately schema-free, so every value is backfilled to its neutral default here.
+    model: nullableStringFromUnknown(record.model),
+    notBefore: nullableStringFromUnknown(record.notBefore),
+    maxRuntimeMinutes: nonNegativeIntFromUnknown(record.maxRuntimeMinutes),
+    verificationCommands: verifyCommandsFromUnknown(record.verificationCommands),
+    integrationBranch: nullableStringFromUnknown(record.integrationBranch),
+    sourceThreadId: nullableStringFromUnknown(record.sourceThreadId),
     createdAt: nullableStringFromUnknown(record.createdAt) ?? LEGACY_PROPOSAL_TIMESTAMP,
     updatedAt: nullableStringFromUnknown(record.updatedAt) ?? LEGACY_PROPOSAL_TIMESTAMP,
   };
@@ -1240,6 +1281,7 @@ export function makeProposal(input: {
   readonly recommendedExecutor?: HermesProposalExecutor;
   readonly verificationPlan?: ReadonlyArray<string>;
   readonly nextCommandOrPrompt?: string | null;
+  readonly sourceThreadId?: string | null;
 }): HermesProposalCard {
   const risk = input.blockedReason !== null ? "blocked" : actionRisk(input.actionKind);
   return {
@@ -1269,6 +1311,12 @@ export function makeProposal(input: {
     projectDir: input.projectDir,
     decisionReason: null,
     decidedAt: null,
+    model: null,
+    notBefore: null,
+    maxRuntimeMinutes: null,
+    verificationCommands: [],
+    integrationBranch: null,
+    sourceThreadId: input.sourceThreadId ?? null,
     createdAt: input.now,
     updatedAt: input.now,
   };
@@ -1837,7 +1885,7 @@ const tailLog: HermesAdapterShape["tailLog"] = (input) =>
     } satisfies HermesLogTailResult;
   });
 
-const listProposals: HermesAdapterShape["listProposals"] = () =>
+export const listProposals: HermesAdapterShape["listProposals"] = () =>
   Effect.gen(function* () {
     const config = yield* getConfig();
     const proposals = yield* Effect.tryPromise({
@@ -2107,7 +2155,47 @@ export const makeChat =
       } satisfies HermesChatResult;
     });
 
-export const decideProposal: HermesAdapterShape["decideProposal"] = (input) =>
+/**
+ * Applies the operator's review edits to a stored card. Edits are optional per field —
+ * an absent key leaves the stored value alone, an explicit `null` clears it. Values are
+ * already validated by `HermesProposalEdits` at the RPC trust boundary; this only maps
+ * them onto the card (the review sheet's "prompt" is the card's nextCommandOrPrompt).
+ */
+export function applyProposalEdits(
+  proposal: HermesProposalCard,
+  edits: HermesProposalEdits | undefined,
+): HermesProposalCard {
+  if (!edits) {
+    return proposal;
+  }
+  return {
+    ...proposal,
+    ...(edits.title === undefined ? {} : { title: edits.title }),
+    ...(edits.prompt === undefined ? {} : { nextCommandOrPrompt: edits.prompt }),
+    ...(edits.projectDir === undefined ? {} : { projectDir: edits.projectDir }),
+    ...(edits.model === undefined ? {} : { model: edits.model }),
+    ...(edits.notBefore === undefined ? {} : { notBefore: edits.notBefore }),
+    ...(edits.maxRuntimeMinutes === undefined
+      ? {}
+      : { maxRuntimeMinutes: edits.maxRuntimeMinutes }),
+    ...(edits.verificationCommands === undefined
+      ? {}
+      : { verificationCommands: edits.verificationCommands }),
+    ...(edits.integrationBranch === undefined
+      ? {}
+      : { integrationBranch: edits.integrationBranch }),
+  };
+}
+
+/**
+ * Single write path for both `decideProposal` (no edits) and `reviewProposal` (edits +
+ * decision). Edits are applied to the same in-memory card the decision mutates, so one
+ * `writeProposals` call persists both — a review can never land a decision without its
+ * edits or vice versa.
+ */
+const reviewProposalInternal = (
+  input: HermesProposalReviewInput,
+): Effect.Effect<HermesProposalCard, HermesAdapterError> =>
   Effect.gen(function* () {
     const config = yield* getConfig();
     const proposals = yield* Effect.tryPromise({
@@ -2118,6 +2206,7 @@ export const decideProposal: HermesAdapterShape["decideProposal"] = (input) =>
     if (!proposal) {
       return yield* toHermesError(`Hermes proposal ${input.proposalId} was not found.`);
     }
+    const edited = applyProposalEdits(proposal, input.edits);
     const now = yield* nowIso();
     const nextStatus =
       input.decision === "approve"
@@ -2126,11 +2215,11 @@ export const decideProposal: HermesAdapterShape["decideProposal"] = (input) =>
           ? "rejected"
           : "deferred";
     const blockedReason =
-      input.decision === "approve" && hermesDirectExecutionBlocked(proposal.actionKind)
+      input.decision === "approve" && hermesDirectExecutionBlocked(edited.actionKind)
         ? "Approved for handoff only. Hermes cannot execute write, integrate, or destructive actions directly."
-        : (input.reason ?? proposal.blockedReason);
+        : (input.reason ?? edited.blockedReason);
     const updated: HermesProposalCard = {
-      ...proposal,
+      ...edited,
       status: nextStatus,
       blockedReason,
       decisionReason: input.reason ?? null,
@@ -2147,6 +2236,12 @@ export const decideProposal: HermesAdapterShape["decideProposal"] = (input) =>
     });
     return updated;
   });
+
+export const decideProposal: HermesAdapterShape["decideProposal"] = (input) =>
+  reviewProposalInternal(input);
+
+export const reviewProposal: HermesAdapterShape["reviewProposal"] = (input) =>
+  reviewProposalInternal(input);
 
 function makeWriteProjectContext(
   capacityMonitor: GitsCapacityMonitorShape,
@@ -2360,6 +2455,7 @@ function makeHermesCliAdapterShape(
     inspectGitsAndPropose: makeInspectGitsAndPropose(notifyAuthFailure),
     chat: makeChat(capacityMonitor, notifyAuthFailure),
     decideProposal,
+    reviewProposal,
     writeProjectContext: makeWriteProjectContext(
       capacityMonitor,
       delamainAdapter,

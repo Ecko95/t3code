@@ -105,7 +105,10 @@ import { HermesAdapter } from "./gits/Services/HermesAdapter.ts";
 import { OpenGsdAdapter } from "./gits/Services/OpenGsdAdapter.ts";
 import { AutomodeSupervisor } from "./gits/Services/AutomodeSupervisor.ts";
 import { AutomodeEpisodeLedger } from "./persistence/Services/AutomodeEpisodeLedger.ts";
-import { decideProposalWithAutomodeBridge } from "./gits/Layers/HermesAutomodeBridge.ts";
+import {
+  decideProposalWithAutomodeBridge,
+  reviewProposalWithAutomodeBridge,
+} from "./gits/Layers/HermesAutomodeBridge.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
 import {
   denyThreadAccess,
@@ -2335,6 +2338,12 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.gitsHermesDecideProposal,
             decideProposalWithAutomodeBridge(hermesAdapter, automodeSupervisor, input),
+            { "rpc.aggregate": "gits" },
+          ),
+        [WS_METHODS.gitsHermesReviewProposal]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.gitsHermesReviewProposal,
+            reviewProposalWithAutomodeBridge(hermesAdapter, automodeSupervisor, input),
             { "rpc.aggregate": "gits" },
           ),
         [WS_METHODS.gitsHermesWriteProjectContext]: (input) =>

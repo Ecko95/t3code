@@ -909,6 +909,14 @@ export const AutomodePolicy = Schema.Struct({
   // dispatch; when false, the sweep keeps its legacy self-approved queued behavior.
   // Decoding default is load-bearing — see telegramDigestEnabled above.
   sweepRequiresConfirmation: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Independent delivery channels for proposal/Automode attention notifications. PWA on,
+  // Telegram off by default. Decoding defaults are load-bearing — see telegramDigestEnabled
+  // above. telegramDigestEnabled stays the kill switch for the daily digest specifically;
+  // these two gate transition notifications.
+  gitsNotificationsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  telegramNotificationsEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   updatedAt: IsoDateTime,
 });
 export type AutomodePolicy = typeof AutomodePolicy.Type;
@@ -957,6 +965,22 @@ export const AutomodeGoal = Schema.Struct({
   // branch when policy sets one, else a per-goal branch cut from the base ref.
   // Decoding default is load-bearing — see origin above.
   branch: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  // Not-before gate, not a second scheduler: the driver leaves the goal queued until this
+  // time passes, then it still has to clear the slot scheduler, arming, capacity, policy,
+  // and kill switch like any other queued goal. Decoding default is load-bearing — see
+  // origin above.
+  notBefore: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  // Per-goal execution overrides carried from an edited, approved proposal. Null/empty
+  // means "fall back to policy". Decoding defaults are load-bearing — see origin above.
+  maxRuntimeMinutes: Schema.NullOr(NonNegativeInt).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  verificationCommands: Schema.Array(GitsVerifyCommand).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  integrationBranch: Schema.NullOr(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
 });
@@ -1015,6 +1039,8 @@ export const AutomodePolicyUpdateInput = Schema.Struct({
   motokoAuthority: Schema.optional(MotokoAuthority),
   telegramDigestEnabled: Schema.optional(Schema.Boolean),
   sweepRequiresConfirmation: Schema.optional(Schema.Boolean),
+  gitsNotificationsEnabled: Schema.optional(Schema.Boolean),
+  telegramNotificationsEnabled: Schema.optional(Schema.Boolean),
 });
 export type AutomodePolicyUpdateInput = typeof AutomodePolicyUpdateInput.Type;
 
@@ -1027,6 +1053,11 @@ export const AutomodeEnqueueGoalInput = Schema.Struct({
   episodeId: Schema.optional(TrimmedNonEmptyString),
   // Goal origin (manual/proposal/sweep); the supervisor defaults to "manual" when absent.
   origin: Schema.optional(AutomodeGoalOrigin),
+  // Execution overrides from an edited, approved proposal.
+  notBefore: Schema.optional(Schema.NullOr(IsoDateTime)),
+  maxRuntimeMinutes: Schema.optional(Schema.NullOr(NonNegativeInt)),
+  verificationCommands: Schema.optional(Schema.Array(GitsVerifyCommand)),
+  integrationBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
 });
 export type AutomodeEnqueueGoalInput = typeof AutomodeEnqueueGoalInput.Type;
 
@@ -1530,10 +1561,54 @@ export const HermesProposalCard = Schema.Struct({
   projectDir: Schema.NullOr(PathString),
   decisionReason: Schema.NullOr(SummaryString),
   decidedAt: Schema.NullOr(IsoDateTime),
+  // Execution settings the operator may edit in the cockpit review sheet before approving.
+  // They ride the approved proposal into its Automode goal. Decoding defaults are
+  // load-bearing: the proposal store is schema-free JSON, so cards written before these
+  // fields existed must still decode (normalizeProposal backfills the same values).
+  model: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  // Not-before time, not a second scheduler: the driver skips the goal until it passes.
+  notBefore: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  maxRuntimeMinutes: Schema.NullOr(NonNegativeInt).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  verificationCommands: Schema.Array(GitsVerifyCommand).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  integrationBranch: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  // Set when the card came from the continuation sweep over unfinished persisted threads.
+  sourceThreadId: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
 export type HermesProposalCard = typeof HermesProposalCard.Type;
+
+/** Edits applied to a proposal at review time; every field is optional (absent = unchanged). */
+export const HermesProposalEdits = Schema.Struct({
+  title: Schema.optional(TrimmedNonEmptyString),
+  prompt: Schema.optional(SummaryString),
+  projectDir: Schema.optional(Schema.NullOr(PathString)),
+  model: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  notBefore: Schema.optional(Schema.NullOr(IsoDateTime)),
+  maxRuntimeMinutes: Schema.optional(Schema.NullOr(NonNegativeInt)),
+  verificationCommands: Schema.optional(Schema.Array(GitsVerifyCommand)),
+  integrationBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+});
+export type HermesProposalEdits = typeof HermesProposalEdits.Type;
+
+/** Atomic "save these edits, then decide" review input from the cockpit review sheet. */
+export const HermesProposalReviewInput = Schema.Struct({
+  proposalId: TrimmedNonEmptyString,
+  decision: HermesProposalDecision,
+  reason: Schema.optional(SummaryString),
+  edits: Schema.optional(HermesProposalEdits),
+});
+export type HermesProposalReviewInput = typeof HermesProposalReviewInput.Type;
 
 export const HermesProposalListInput = Schema.Struct({});
 export type HermesProposalListInput = typeof HermesProposalListInput.Type;

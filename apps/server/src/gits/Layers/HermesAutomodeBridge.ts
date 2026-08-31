@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
 
-import type { HermesProposalDecisionInput } from "@t3tools/contracts";
+import type { HermesProposalDecisionInput, HermesProposalReviewInput } from "@t3tools/contracts";
 
 import type { AutomodeSupervisorShape } from "../Services/AutomodeSupervisor.ts";
 import type { HermesAdapterShape } from "../Services/HermesAdapter.ts";
@@ -91,6 +91,78 @@ export const decideProposalWithAutomodeBridge = (
         ),
         Effect.catch((cause) =>
           Effect.logWarning("hermes→automode auto-enqueue failed after approval", {
+            proposalId: input.proposalId,
+            detail: cause.message,
+          }),
+        ),
+      );
+    }
+    return decided;
+  });
+
+/**
+ * Cockpit review bridge. Unlike {@link decideProposalWithAutomodeBridge} this is NOT gated
+ * on `autoEnqueueApprovedProposals`/autonomous mode: the operator opened the review sheet,
+ * edited the execution settings, and pressed Approve — queueing is the whole point of the
+ * gesture. Queueing is still not dispatching: the goal lands as an ordinary queued goal and
+ * must clear its not-before time plus the slot scheduler, arming, capacity, policy gates,
+ * and kill switch before the driver runs it.
+ *
+ * Re-approving a proposal whose episode already has a live goal is a no-op, so a double
+ * click (or a retry after a flaky RPC) cannot queue the same work twice.
+ *
+ * Bridge failures are logged, not surfaced — see the note on the decide bridge: the edits
+ * and decision already persisted, and failing the RPC afterwards would strand the operator.
+ */
+export const reviewProposalWithAutomodeBridge = (
+  hermes: Pick<HermesAdapterShape, "listProposals" | "reviewProposal" | "draftFromProposal">,
+  automode: Pick<AutomodeSupervisorShape, "getSnapshot" | "enqueueGoal">,
+  input: HermesProposalReviewInput,
+): ReturnType<HermesAdapterShape["reviewProposal"]> =>
+  Effect.gen(function* () {
+    // Read before deciding: an already-approved card must not enqueue a second goal, and
+    // the live-goal check needs the pre-decision snapshot.
+    const snapshot =
+      input.decision === "approve"
+        ? yield* automode.getSnapshot().pipe(Effect.catch(() => Effect.succeed(null)))
+        : null;
+    const priorProposal =
+      input.decision === "approve"
+        ? ((yield* hermes
+            .listProposals()
+            .pipe(
+              Effect.catch(() => Effect.succeed({ proposals: [], checkedAt: "" as const })),
+            )).proposals.find((proposal) => proposal.id === input.proposalId) ?? null)
+        : null;
+    const decided = yield* hermes.reviewProposal(input);
+    const alreadyLive =
+      snapshot !== null &&
+      priorProposal !== null &&
+      hasLiveGoalForEpisode(snapshot.goals, priorProposal.episodeId);
+    if (input.decision === "approve" && priorProposal?.status !== "approved" && !alreadyLive) {
+      yield* hermes.draftFromProposal({ proposalId: input.proposalId }).pipe(
+        Effect.flatMap((draft) =>
+          draft.kind === "delamain-peer" && draft.status === "draft" && draft.repo !== null
+            ? automode
+                .enqueueGoal({
+                  title: decided.title,
+                  // The draft prompt already reflects the edited nextCommandOrPrompt, since
+                  // the edits were persisted before draftFromProposal read the card back.
+                  prompt: draft.prompt,
+                  repo: draft.repo,
+                  origin: "proposal",
+                  episodeId: decided.episodeId,
+                  ...(decided.model === null ? {} : { model: decided.model }),
+                  notBefore: decided.notBefore,
+                  maxRuntimeMinutes: decided.maxRuntimeMinutes,
+                  verificationCommands: decided.verificationCommands,
+                  integrationBranch: decided.integrationBranch,
+                })
+                .pipe(Effect.asVoid)
+            : Effect.void,
+        ),
+        Effect.catch((cause) =>
+          Effect.logWarning("hermes→automode review enqueue failed after approval", {
             proposalId: input.proposalId,
             detail: cause.message,
           }),

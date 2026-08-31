@@ -53,6 +53,53 @@ describe("AutomodePolicy held-PR fields", () => {
     expect(decoded.sweepRequiresConfirmation).toBe(true);
   });
 
+  it("defaults notification preferences to PWA on and Telegram off", () => {
+    const decoded = Schema.decodeUnknownSync(AutomodePolicy)({
+      mode: "manual",
+      killSwitchEnabled: true,
+      maxActivePeers: 1,
+      allowedRepos: [],
+      allowedModels: [],
+      defaultModel: null,
+      maxBudgetUsd: null,
+      maxRuntimeMinutes: 60,
+      requireApprovalForPeerSpawn: true,
+      requireApprovalBeforeIntegrate: true,
+      requireApprovalBeforeDestructiveAction: true,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(decoded.gitsNotificationsEnabled).toBe(true);
+    expect(decoded.telegramNotificationsEnabled).toBe(false);
+  });
+
+  it("accepts independent notification preferences on policy and update input", () => {
+    const decoded = Schema.decodeUnknownSync(AutomodePolicy)({
+      mode: "manual",
+      killSwitchEnabled: true,
+      maxActivePeers: 1,
+      allowedRepos: [],
+      allowedModels: [],
+      defaultModel: null,
+      maxBudgetUsd: null,
+      maxRuntimeMinutes: 60,
+      requireApprovalForPeerSpawn: true,
+      requireApprovalBeforeIntegrate: true,
+      requireApprovalBeforeDestructiveAction: true,
+      gitsNotificationsEnabled: false,
+      telegramNotificationsEnabled: true,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(decoded.gitsNotificationsEnabled).toBe(false);
+    expect(decoded.telegramNotificationsEnabled).toBe(true);
+
+    const updateDecoded = Schema.decodeUnknownSync(AutomodePolicyUpdateInput)({
+      gitsNotificationsEnabled: false,
+      telegramNotificationsEnabled: true,
+    });
+    expect(updateDecoded.gitsNotificationsEnabled).toBe(false);
+    expect(updateDecoded.telegramNotificationsEnabled).toBe(true);
+  });
+
   it("accepts the new fields on the update input", () => {
     const decoded = Schema.decodeUnknownSync(AutomodePolicyUpdateInput)({
       mode: "autonomous",

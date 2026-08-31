@@ -258,6 +258,10 @@ const defaultAutomodeGoal: AutomodeGoal = {
   workflowId: null,
   origin: "manual",
   branch: null,
+  notBefore: null,
+  maxRuntimeMinutes: null,
+  verificationCommands: [],
+  integrationBranch: null,
 };
 const defaultAutomodeSnapshot: AutomodeSnapshot = {
   policy: {
@@ -280,6 +284,8 @@ const defaultAutomodeSnapshot: AutomodeSnapshot = {
     motokoAuthority: "observe",
     telegramDigestEnabled: true,
     sweepRequiresConfirmation: true,
+    gitsNotificationsEnabled: true,
+    telegramNotificationsEnabled: false,
     updatedAt: "2026-01-01T00:00:00.000Z",
   },
   budgetUsage: {
@@ -494,6 +500,12 @@ const defaultHermesProposal: HermesProposalCard = {
   projectDir: null,
   decisionReason: null,
   decidedAt: null,
+  model: null,
+  notBefore: null,
+  maxRuntimeMinutes: null,
+  verificationCommands: [],
+  integrationBranch: null,
+  sourceThreadId: null,
   createdAt: "1970-01-01T00:00:00.000Z",
   updatedAt: "1970-01-01T00:00:00.000Z",
 };

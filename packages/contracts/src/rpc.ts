@@ -88,6 +88,7 @@ import {
   HermesProjectContextResult,
   HermesProposalCard,
   HermesProposalDecisionInput,
+  HermesProposalReviewInput,
   HermesProposalListInput,
   HermesProposalListResult,
   HermesSafeConfig,
@@ -338,6 +339,7 @@ export const WS_METHODS = {
   gitsHermesInspectGits: "gits.hermes.proposals.inspectGits",
   gitsHermesChat: "gits.hermes.chat",
   gitsHermesDecideProposal: "gits.hermes.proposals.decide",
+  gitsHermesReviewProposal: "gits.hermes.proposals.review",
   gitsHermesWriteProjectContext: "gits.hermes.context.write",
   gitsHermesDraftFromProposal: "gits.hermes.proposals.draft",
   gitsHermesRunSchedule: "gits.hermes.schedules.run",
@@ -1096,6 +1098,12 @@ export const WsGitsHermesDecideProposalRpc = Rpc.make(WS_METHODS.gitsHermesDecid
   error: HermesAdapterError,
 });
 
+export const WsGitsHermesReviewProposalRpc = Rpc.make(WS_METHODS.gitsHermesReviewProposal, {
+  payload: HermesProposalReviewInput,
+  success: HermesProposalCard,
+  error: HermesAdapterError,
+});
+
 export const WsGitsHermesWriteProjectContextRpc = Rpc.make(
   WS_METHODS.gitsHermesWriteProjectContext,
   {
@@ -1350,6 +1358,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsGitsHermesInspectGitsRpc,
   WsGitsHermesChatRpc,
   WsGitsHermesDecideProposalRpc,
+  WsGitsHermesReviewProposalRpc,
   WsGitsHermesWriteProjectContextRpc,
   WsGitsHermesDraftFromProposalRpc,
   WsGitsHermesRunScheduleRpc,

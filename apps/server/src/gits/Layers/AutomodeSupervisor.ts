@@ -237,6 +237,8 @@ function defaultPolicy(updatedAt: string): AutomodePolicy {
     motokoAuthority: "observe",
     telegramDigestEnabled: true,
     sweepRequiresConfirmation: true,
+    gitsNotificationsEnabled: true,
+    telegramNotificationsEnabled: false,
     updatedAt,
   };
 }
@@ -426,6 +428,9 @@ function applyPolicyUpdate(
     motokoAuthority: input.motokoAuthority ?? policy.motokoAuthority,
     telegramDigestEnabled: input.telegramDigestEnabled ?? policy.telegramDigestEnabled,
     sweepRequiresConfirmation: input.sweepRequiresConfirmation ?? policy.sweepRequiresConfirmation,
+    gitsNotificationsEnabled: input.gitsNotificationsEnabled ?? policy.gitsNotificationsEnabled,
+    telegramNotificationsEnabled:
+      input.telegramNotificationsEnabled ?? policy.telegramNotificationsEnabled,
     updatedAt,
   };
 }
@@ -703,6 +708,10 @@ export const AutomodeSupervisorLive = Layer.effect(
             rejectedAt: null,
             workflowId: null,
             branch: null,
+            notBefore: input.notBefore ?? null,
+            maxRuntimeMinutes: input.maxRuntimeMinutes ?? null,
+            verificationCommands: input.verificationCommands ?? [],
+            integrationBranch: input.integrationBranch ?? null,
           };
           const nextState = yield* commitState((state) => ({
             ...state,

@@ -17,6 +17,7 @@ import {
   HermesCodexAuthStatus,
   HermesExecutionDraft,
   HermesProposalCard,
+  HermesProposalReviewInput,
   HermesScheduleRunResult,
   HermesStatusResult,
 } from "./gits.ts";
@@ -34,6 +35,7 @@ const decodeHermesStatus = Schema.decodeUnknownSync(HermesStatusResult);
 const decodeHermesCodexAuthStatus = Schema.decodeUnknownSync(HermesCodexAuthStatus);
 const decodeHermesChatResult = Schema.decodeUnknownSync(HermesChatResult);
 const decodeHermesProposal = Schema.decodeUnknownSync(HermesProposalCard);
+const decodeHermesProposalReview = Schema.decodeUnknownSync(HermesProposalReviewInput);
 const decodeHermesDraft = Schema.decodeUnknownSync(HermesExecutionDraft);
 const decodeHermesScheduleRun = Schema.decodeUnknownSync(HermesScheduleRunResult);
 
@@ -543,5 +545,59 @@ describe("Hermes Motoko contracts", () => {
     expect(chatResult.proposal?.id).toBe(proposal.id);
     expect(draft.kind).toBe("delamain-peer");
     expect(schedule.proposals).toHaveLength(1);
+  });
+
+  it("defaults execution settings on a legacy proposal card", () => {
+    const proposal = decodeHermesProposal(baseProposal);
+    expect(proposal.model).toBeNull();
+    expect(proposal.notBefore).toBeNull();
+    expect(proposal.maxRuntimeMinutes).toBeNull();
+    expect(proposal.verificationCommands).toEqual([]);
+    expect(proposal.integrationBranch).toBeNull();
+    expect(proposal.sourceThreadId).toBeNull();
+  });
+
+  it("accepts explicit proposal execution settings", () => {
+    const proposal = decodeHermesProposal({
+      ...baseProposal,
+      model: "gpt-5.4",
+      notBefore: "2026-06-02T22:00:00.000Z",
+      maxRuntimeMinutes: 45,
+      verificationCommands: [{ label: "typecheck", cmd: ["bun", "typecheck"] }],
+      integrationBranch: "auto/gits",
+      sourceThreadId: "thread-9",
+    });
+    expect(proposal.model).toBe("gpt-5.4");
+    expect(proposal.notBefore).toBe("2026-06-02T22:00:00.000Z");
+    expect(proposal.maxRuntimeMinutes).toBe(45);
+    expect(proposal.verificationCommands[0]?.label).toBe("typecheck");
+    expect(proposal.integrationBranch).toBe("auto/gits");
+    expect(proposal.sourceThreadId).toBe("thread-9");
+  });
+
+  it("accepts a review input carrying edits alongside the decision", () => {
+    const decoded = decodeHermesProposalReview({
+      proposalId: "proposal-1",
+      decision: "approve",
+      reason: "Looks right.",
+      edits: {
+        title: "Edited title",
+        prompt: "Edited execution prompt.",
+        projectDir: "/home/test/project",
+        model: "gpt-5.4",
+        notBefore: "2026-06-02T22:00:00.000Z",
+        maxRuntimeMinutes: 30,
+        verificationCommands: [{ label: "test", cmd: ["bun", "run", "test"] }],
+        integrationBranch: "auto/gits",
+      },
+    });
+    expect(decoded.decision).toBe("approve");
+    expect(decoded.edits?.title).toBe("Edited title");
+    expect(decoded.edits?.verificationCommands?.[0]?.cmd).toEqual(["bun", "run", "test"]);
+  });
+
+  it("accepts a review input with no edits", () => {
+    const decoded = decodeHermesProposalReview({ proposalId: "proposal-1", decision: "reject" });
+    expect(decoded.edits).toBeUndefined();
   });
 });
