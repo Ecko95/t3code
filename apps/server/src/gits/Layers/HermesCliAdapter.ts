@@ -1086,6 +1086,24 @@ function nullableStringFromUnknown(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+/**
+ * Continuation provenance: a card may claim to continue a past thread ONLY when Hermes
+ * actually cited that thread in its output. The sweep offers a continuation candidate as a
+ * hint ("propose the smallest safe continuation if it is still relevant"), and Hermes is
+ * free to ignore it and propose something else entirely — stamping the id regardless would
+ * record a source thread the card has nothing to do with, and that lie is durable: it is
+ * persisted on the card and carried into the goal.
+ */
+export function citedSourceThreadId(
+  detail: string,
+  candidateThreadId: string | undefined,
+): string | null {
+  if (candidateThreadId === undefined || candidateThreadId.trim().length === 0) {
+    return null;
+  }
+  return detail.includes(candidateThreadId) ? candidateThreadId : null;
+}
+
 export function normalizeProposal(value: unknown): HermesProposalCard | null {
   if (typeof value !== "object" || value === null) {
     return null;
@@ -1961,7 +1979,8 @@ const makeInspectGitsAndPropose =
             : `Hermes Codex OAuth chain requires re-login. Run \`${preflight.command}\`.`,
           source: "hermes chat -q",
           projectDir: input.projectDir,
-          ...(input.sourceThreadId === undefined ? {} : { sourceThreadId: input.sourceThreadId }),
+          // No sourceThreadId: Hermes was never spawned, so this auth-failure card
+          // continues nothing — claiming a source thread here is pure mislabeling.
           now,
           evidence: ["GITS preflight blocked the Hermes spawn before execution.", preflight.reason],
         });
@@ -2001,6 +2020,7 @@ const makeInspectGitsAndPropose =
       const detail =
         nonEmpty(exec.stdout) ?? nonEmpty(exec.stderr) ?? "Hermes returned no proposal.";
       const summary = summarizeProposal(detail);
+      const citedThreadId = citedSourceThreadId(detail, input.sourceThreadId);
       const proposal = makeProposal({
         title: summary.title,
         summary: summary.summary,
@@ -2013,11 +2033,12 @@ const makeInspectGitsAndPropose =
         blockedReason: exec.exitCode === 0 ? null : "Hermes proposal command did not complete.",
         source: "hermes chat -q",
         projectDir: input.projectDir,
-        ...(input.sourceThreadId === undefined ? {} : { sourceThreadId: input.sourceThreadId }),
+        ...(citedThreadId === null ? {} : { sourceThreadId: citedThreadId }),
         now,
         evidence: [
           "Hermes was invoked in read-only inspection mode.",
           `Hermes exit code: ${exec.exitCode === null ? "unknown" : String(exec.exitCode)}`,
+          ...(citedThreadId === null ? [] : [`Continues unfinished GITS thread ${citedThreadId}.`]),
         ],
       });
       const proposals = yield* Effect.tryPromise({

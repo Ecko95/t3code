@@ -34,6 +34,7 @@ import {
   makeHermesEnv,
   makeProposal,
   normalizeProposal,
+  citedSourceThreadId,
   summarizeProposal,
   parseCodexChainHealth,
   parseHermesModelStatus,
@@ -801,6 +802,27 @@ describe("HermesCliAdapter chat preflight", () => {
     expect(result.setupCommand).toBe(hermesModelCommand(tmp));
     expect(result.blockedReason).toContain("openai-codex");
     expect(result.blockedReason).not.toContain("re-login");
+  });
+});
+
+describe("citedSourceThreadId", () => {
+  it("claims the thread only when Hermes cited it", () => {
+    expect(
+      citedSourceThreadId("Continuing thread-9: finish the retry migration.", "thread-9"),
+    ).toBe("thread-9");
+  });
+
+  // The sweep offers a continuation as a hint; Hermes may ignore it and propose something
+  // unrelated. Stamping the id anyway would persist a source thread the card never touched.
+  it("drops the claim when the proposal ignored the candidate", () => {
+    expect(
+      citedSourceThreadId("Add a missing index to the projections table.", "thread-9"),
+    ).toBeNull();
+  });
+
+  it("is null when no candidate was offered", () => {
+    expect(citedSourceThreadId("Anything at all.", undefined)).toBeNull();
+    expect(citedSourceThreadId("Anything at all.", "   ")).toBeNull();
   });
 });
 
