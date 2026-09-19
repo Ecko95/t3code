@@ -72,12 +72,28 @@ export function merge_verify_commands(
 const TERMINAL_FAIL_STATUSES = new Set<PeerStatus>(["failed", "frozen", "killed", "halted"]);
 const TERMINAL_DONE_STATUSES = new Set<PeerStatus>(["done", "completed"]);
 
-function oldestQueued(goals: ReadonlyArray<AutomodeGoal>): AutomodeGoal | null {
+/**
+ * A goal's operator-chosen not-before time. Unparseable input is treated as due now rather
+ * than parking the goal forever — the value is schema-validated at the RPC boundary, so a
+ * bad one here means corrupted state, and stalling silently is the worse failure.
+ */
+function isDue(goal: AutomodeGoal, nowMillis: number): boolean {
+  if (goal.notBefore === null) {
+    return true;
+  }
+  const at = Date.parse(goal.notBefore);
+  return Number.isNaN(at) || at <= nowMillis;
+}
+
+function oldestQueued(goals: ReadonlyArray<AutomodeGoal>, nowMillis: number): AutomodeGoal | null {
   // The snapshot sorts goals newest-first; reverse before sorting so that
   // equal-timestamp goals remain in oldest-first (FIFO) order.
+  //
+  // notBefore is filtered HERE, not checked on the winner: parking the head of the queue
+  // would stall every due goal behind it until the scheduled one fired.
   const queued = goals
     .toReversed()
-    .filter((goal) => goal.status === "queued")
+    .filter((goal) => goal.status === "queued" && isDue(goal, nowMillis))
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   return queued[0] ?? null;
 }
@@ -580,15 +596,8 @@ export const AutomodeDriverLive = Layer.effect(
         }
 
         // 3) Queue drained → held-PR lifecycle only.
-        const next = oldestQueued(snapshot.goals);
+        const next = oldestQueued(snapshot.goals, yield* Clock.currentTimeMillis);
         if (next === null) {
-          yield* maintainHeldPr(snapshot);
-          return;
-        }
-        if (
-          next.notBefore !== null &&
-          Date.parse(next.notBefore) > (yield* Clock.currentTimeMillis)
-        ) {
           yield* maintainHeldPr(snapshot);
           return;
         }

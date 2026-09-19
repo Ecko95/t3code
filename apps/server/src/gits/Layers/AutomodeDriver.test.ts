@@ -460,6 +460,31 @@ describe("AutomodeDriver", () => {
     }).pipe(Effect.provide(makeLayer(peerStatus)));
   });
 
+  // Head-of-line blocking guard: notBefore parks ONE goal, not the whole queue. A goal
+  // scheduled for tonight sitting at the head must not stall work that is due now.
+  it.effect("dispatches a due goal queued behind a not-yet-due one", () => {
+    const peerStatus = { current: "absent" as PeerStatus | "absent" };
+    return Effect.gen(function* () {
+      const supervisor = yield* AutomodeSupervisor;
+      const driver = yield* AutomodeDriver;
+      yield* armAutonomous(supervisor);
+      // Enqueued first, so it is the oldest and wins the FIFO pick — but it is not due.
+      yield* supervisor.enqueueGoal({
+        title: "Tonight",
+        repo: "/tmp/source-repo",
+        prompt: "later",
+        notBefore: "2099-01-01T00:00:00.000Z",
+      });
+      yield* supervisor.enqueueGoal({ title: "Now", repo: "/tmp/source-repo", prompt: "now" });
+
+      yield* driver.tickOnce();
+
+      const goals = (yield* supervisor.getSnapshot()).goals;
+      assert.equal(goals.find((goal) => goal.title === "Now")?.status, "running");
+      assert.equal(goals.find((goal) => goal.title === "Tonight")?.status, "queued");
+    }).pipe(Effect.provide(makeLayer(peerStatus)));
+  });
+
   it.effect("does not dispatch a second goal while one is running (sequential)", () => {
     const peerStatus = { current: "absent" as PeerStatus | "absent" };
     return Effect.gen(function* () {
